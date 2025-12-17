@@ -25,10 +25,14 @@ logger = logging.getLogger(__name__)
 class APIConfig:
     """API keys and endpoints configuration."""
     
-    # LLM APIs (Primary: OpenAI, Fallback: Gemini, Second Fallback: Groq)
+    # LLM APIs (Primary: OpenAI, Fallbacks: Gemini, Groq, Ollama)
     openai_api_key: str = field(default_factory=lambda: os.getenv('OPENAI_API_KEY', ''))
     gemini_api_key: str = field(default_factory=lambda: os.getenv('GEMINI_API_KEY', ''))
     groq_api_key: str = field(default_factory=lambda: os.getenv('GROQ_API_KEY', ''))
+    
+    # Ollama (local LLM, no API key needed)
+    ollama_enabled: bool = field(default_factory=lambda: os.getenv('OLLAMA_ENABLED', 'false').lower() == 'true')
+    ollama_base_url: str = field(default_factory=lambda: os.getenv('OLLAMA_BASE_URL', 'http://localhost:11434'))
     
     # TTS API
     cartesia_api_key: str = field(default_factory=lambda: os.getenv('CARTESIA_API_KEY', ''))
@@ -42,9 +46,9 @@ class APIConfig:
         """Validate required API keys."""
         errors = []
         
-        # At least one LLM API key required
-        if not any([self.openai_api_key, self.gemini_api_key, self.groq_api_key]):
-            errors.append("At least one LLM API key required (OpenAI/Gemini/Groq)")
+        # At least one LLM API key or Ollama required
+        if not any([self.openai_api_key, self.gemini_api_key, self.groq_api_key, self.ollama_enabled]):
+            errors.append("At least one LLM API key or Ollama required (OpenAI/Gemini/Groq/Ollama)")
         
         # TTS API key required
         if not self.cartesia_api_key:
@@ -67,6 +71,8 @@ class APIConfig:
             providers.append('gemini')
         if self.groq_api_key:
             providers.append('groq')
+        if self.ollama_enabled:
+            providers.append('ollama')
         return providers
 
 
@@ -87,9 +93,14 @@ class LLMConfig:
     groq_model: str = "llama-3.1-8b-instant"
     groq_max_tokens: int = 120
     
+    # Third fallback (Ollama - local)
+    ollama_model: str = "llama3.1:latest"  # 8B model
+    ollama_max_tokens: int = 120
+    
     # Timeouts
     request_timeout: float = 12.0
     connect_timeout: float = 5.0
+    ollama_timeout: float = 30.0  # Local models may take longer
     
     # Retry configuration
     max_retries: int = 3
@@ -114,6 +125,10 @@ class LLMConfig:
             'groq': {
                 'model': self.groq_model,
                 'max_tokens': self.groq_max_tokens
+            },
+            'ollama': {
+                'model': self.ollama_model,
+                'max_tokens': self.ollama_max_tokens
             }
         }
         return configs.get(provider, {})

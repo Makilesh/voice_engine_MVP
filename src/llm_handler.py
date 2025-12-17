@@ -413,6 +413,8 @@ CRITICAL: Your response will be spoken aloud. Keep it concise and natural."""
             return await self._call_gemini(messages, max_tokens, temperature)
         elif provider == 'groq':
             return await self._call_groq(messages, max_tokens, temperature)
+        elif provider == 'ollama':
+            return await self._call_ollama(messages, max_tokens, temperature)
         else:
             raise ValueError(f"Unknown provider: {provider}")
     
@@ -510,6 +512,33 @@ CRITICAL: Your response will be spoken aloud. Keep it concise and natural."""
         
         result = response.json()
         return result['choices'][0]['message']['content'].strip()
+    
+    async def _call_ollama(
+        self,
+        messages: list,
+        max_tokens: int,
+        temperature: float
+    ) -> Optional[str]:
+        """Call Ollama API (local LLM, third fallback)."""
+        payload = {
+            "model": self.config.llm.ollama_model,
+            "messages": messages,
+            "options": {
+                "temperature": temperature,
+                "num_predict": max_tokens
+            },
+            "stream": False
+        }
+        
+        url = f"{self.config.api.ollama_base_url}/api/chat"
+        
+        # Create temporary client with longer timeout for Ollama
+        async with httpx.AsyncClient(timeout=self.config.llm.ollama_timeout) as ollama_client:
+            response = await ollama_client.post(url, json=payload)
+            response.raise_for_status()
+            
+            result = response.json()
+            return result['message']['content'].strip()
     
     def _track_error(self):
         """Track consecutive errors for circuit breaker pattern."""
