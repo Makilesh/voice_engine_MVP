@@ -1,0 +1,34 @@
+# Voice Processing Dependencies
+# realtimetts[orpheus]
+
+RealtimeSTT
+faster-whisper
+requests
+python-dotenv
+openai
+
+# Cartesia AI for ultra-low latency TTS
+cartesia
+
+# Audio Processing
+soundfile
+numpy
+librosa
+scipy
+pyaudio
+
+# Async Support
+asyncio
+httpx
+
+# Logging
+colorlog
+
+# Optional: For better performance
+torch
+transformers
+
+sounddevice
+
+# Memory monitoring
+psutil
