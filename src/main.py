@@ -205,7 +205,16 @@ async def main():
         stt_handler = STTHandler(mode="balanced")
         await stt_handler.start_listening()
         logger.info("✅ STT: Continuous listening active")
-        
+
+        # Validate STT initialization
+        if not stt_handler.recorder:
+            logger.error("❌ STT recorder failed to initialize")
+            raise RuntimeError("Microphone not available. Check permissions and ensure no other app is using it.")
+
+        if not stt_handler.is_listening:
+            logger.error("❌ STT started but not listening")
+            raise RuntimeError("STT started but failed to enter listening state")
+
         # Initialize LLM
         llm_handler = LLMHandler()
         logger.info("✅ LLM: Ready")

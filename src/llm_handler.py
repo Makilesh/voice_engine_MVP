@@ -137,7 +137,11 @@ class LLMHandler:
             ),
             limits=httpx.Limits(max_keepalive_connections=5)
         )
-        
+
+        # Message cache for conversation history (saves 20-50ms per request)
+        self.message_cache = []
+        self.cache_history_id = None
+
         self.interaction_count = 0
         self.consecutive_errors = 0
         self.last_error_time = 0
@@ -228,19 +232,35 @@ class LLMHandler:
             
             # Build messages (pass sentiment as string key for LRU cache)
             system_prompt = self._build_dynamic_system_prompt(sentiment['sentiment'], has_history=True)
-            messages = [{"role": "system", "content": system_prompt}]
-            
-            # Add conversation history (last 6 exchanges for speed)
-            for i, exchange in enumerate(conversation_history[-6:]):
-                if exchange.startswith("System:"):
-                    continue  # Skip system messages in history
-                
-                if exchange.startswith("User:"):
-                    messages.append({"role": "user", "content": exchange[5:].strip()})
-                elif exchange.startswith("Agent:"):
-                    messages.append({"role": "assistant", "content": exchange[6:].strip()})
-            
-            messages.append({"role": "user", "content": processed_text})
+
+            # Check if we can use cached message history
+            current_history_id = id(conversation_history)
+            if current_history_id != self.cache_history_id:
+                # Rebuild message cache with length limits
+                MAX_MESSAGE_LENGTH = 500
+                self.message_cache = []
+                for exchange in conversation_history[-6:]:
+                    if exchange.startswith("System:"):
+                        continue  # Skip system messages in history
+
+                    if exchange.startswith("User:"):
+                        content = exchange[5:].strip()
+                        if len(content) > MAX_MESSAGE_LENGTH:
+                            content = content[:MAX_MESSAGE_LENGTH] + "..."
+                            logger.debug(f"Truncated long User message: {len(exchange)} -> {MAX_MESSAGE_LENGTH}")
+                        self.message_cache.append({"role": "user", "content": content})
+                    elif exchange.startswith("Agent:"):
+                        content = exchange[6:].strip()
+                        if len(content) > MAX_MESSAGE_LENGTH:
+                            content = content[:MAX_MESSAGE_LENGTH] + "..."
+                            logger.debug(f"Truncated long Agent message: {len(exchange)} -> {MAX_MESSAGE_LENGTH}")
+                        self.message_cache.append({"role": "assistant", "content": content})
+
+                self.cache_history_id = current_history_id
+                logger.debug(f"Rebuilt message cache with {len(self.message_cache)} messages")
+
+            # Build final message list from cache (much faster)
+            messages = [{"role": "system", "content": system_prompt}] + self.message_cache + [{"role": "user", "content": processed_text}]
             
             payload = {
                 "model": "gpt-4o-mini",

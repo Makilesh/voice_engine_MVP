@@ -59,6 +59,10 @@ class TTSHandler:
             from config import get_config
             self.barge_in_sensitivity = get_config().tts.barge_in_min_chars
             
+            # Barge-in error tracking for graceful degradation
+            self.barge_in_error_count = 0
+            self.max_barge_in_errors = 3
+            
             # Async event loop for Cartesia (if needed)
             self.cartesia_loop = None
             self.cartesia_thread = None
@@ -160,6 +164,11 @@ class TTSHandler:
             
         except Exception as e:
             logger.debug(f"Barge-in check error: {e}")
+            # Track errors for graceful degradation
+            self.barge_in_error_count += 1
+            if self.barge_in_error_count >= self.max_barge_in_errors:
+                logger.error(f"❌ Barge-in disabled due to {self.max_barge_in_errors} consecutive errors")
+                self.is_barge_in_enabled = False
             return False
     
     def _monitor_barge_in(self):
@@ -176,6 +185,11 @@ class TTSHandler:
             tts_startup_buffer = 0.15  # Ignore first 150ms
             check_interval = 0.02  # Check every 20ms
             
+            # Safety limits to prevent infinite loops
+            max_monitor_duration = 60.0  # Maximum 60 seconds
+            max_iterations = 3000  # Maximum 3000 iterations
+            iterations = 0
+            
             logger.info("👂 Barge-in monitor: ACTIVE")
             
             self.last_seen_realtime_text = ""
@@ -183,12 +197,23 @@ class TTSHandler:
             min_consecutive = 2  # Need 2 consecutive detections (40ms)
             
             while not self.stop_event.is_set():
+                iterations += 1
+                elapsed = time.time() - playback_start
+                
+                # Safety checks to prevent runaway threads
+                if iterations > max_iterations:
+                    logger.warning(f"⚠️ Monitor exceeded max iterations ({max_iterations}), stopping")
+                    break
+                if elapsed > max_monitor_duration:
+                    logger.warning(f"⚠️ Monitor exceeded max duration ({max_monitor_duration}s), stopping")
+                    break
+                
                 with self.state_lock:
                     if not self.is_playing:
                         break
                 
                 # Skip TTS startup buffer
-                if time.time() - playback_start < tts_startup_buffer:
+                if elapsed < tts_startup_buffer:
                     time.sleep(check_interval)
                     continue
                 
@@ -471,7 +496,18 @@ class TTSHandler:
                 # Stop event loop
                 if self.cartesia_loop:
                     self.cartesia_loop.call_soon_threadsafe(self.cartesia_loop.stop)
-                
+
+                    # Wait for thread to complete
+                    if self.cartesia_thread and self.cartesia_thread.is_alive():
+                        self.cartesia_thread.join(timeout=2.0)
+                        if self.cartesia_thread.is_alive():
+                            logger.warning("⚠️ Cartesia thread didn't stop within timeout")
+
+                    # Close event loop
+                    if not self.cartesia_loop.is_closed():
+                        self.cartesia_loop.close()
+                        logger.debug("Cartesia event loop closed")
+
                 self.cartesia_engine = None
                 logger.info("✅ Cartesia TTS shutdown complete")
             

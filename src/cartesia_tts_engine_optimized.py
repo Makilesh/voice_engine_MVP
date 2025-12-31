@@ -117,10 +117,11 @@ class CartesiaTTSEngine:
         self.state_lock = threading.Lock()
         self.stop_event = threading.Event()
         
-        # Dynamic audio queue (WebSocket → PyAudio)
-        self.current_queue_size = self.config.memory.audio_queue_default_size
+        # Dynamic audio queue (WebSocket → PyAudio) - size based on latency mode
+        self.current_queue_size = self.config.memory.get_queue_size_for_mode()
         self.audio_queue: queue.Queue = queue.Queue(maxsize=self.current_queue_size)
         self.queue_lock = threading.Lock()
+        logger.info(f"🎵 Audio queue initialized: {self.current_queue_size} elements ({self.config.memory.latency_mode} mode)")
         
         # Memory monitoring
         self.process = psutil.Process() if self.config.memory.enable_memory_monitoring else None
@@ -268,14 +269,14 @@ class CartesiaTTSEngine:
                 
                 # Queue for playback (blocking with timeout to apply backpressure)
                 try:
-                    # Use blocking put with timeout instead of dropping chunks
-                    self.audio_queue.put(audio_bytes, timeout=1.0)
+                    # Use blocking put with configurable timeout
+                    self.audio_queue.put(audio_bytes, timeout=self.config.tts.queue_put_timeout)
                     chunk_count += 1
                 except queue.Full:
                     logger.warning("⚠️ Audio queue timeout, chunk may be delayed")
-                    # Try one more time with longer timeout
+                    # Try one more time with double timeout
                     try:
-                        self.audio_queue.put(audio_bytes, timeout=2.0)
+                        self.audio_queue.put(audio_bytes, timeout=self.config.tts.queue_put_timeout * 2)
                         chunk_count += 1
                     except queue.Full:
                         logger.warning("⚠️ Audio queue full after retry, dropping chunk")
@@ -458,8 +459,8 @@ class CartesiaTTSEngine:
             try:
                 self.audio_queue.put("STOP", timeout=0.1)
             except queue.Full:
-                # Clear queue and try again
-                while not self.audio_queue.empty():
+                # Clear queue using exception-based draining (no TOCTOU race)
+                while True:
                     try:
                         self.audio_queue.get_nowait()
                     except queue.Empty:

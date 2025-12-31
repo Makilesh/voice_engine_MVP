@@ -168,6 +168,12 @@ class TTSConfig:
     barge_in_check_interval: float = 0.02  # Check every 20ms
     barge_in_min_chars: int = 2  # Minimum characters to trigger barge-in
     
+    # Timeout settings
+    cartesia_init_timeout: float = 10.0  # Cartesia initialization timeout
+    queue_put_timeout: float = 1.0  # Audio queue put timeout
+    playback_timeout: float = 30.0  # Maximum playback wait time
+    websocket_timeout: float = 15.0  # WebSocket connection timeout
+    
     # Fallback TTS (SystemEngine)
     fallback_enabled: bool = True
     fallback_voice: str = "default"
@@ -201,7 +207,10 @@ class STTConfig:
 class MemoryConfig:
     """Memory and performance configuration."""
     
-    # Audio queue sizing (dynamic)
+    # Latency mode configuration
+    latency_mode: str = "balanced"  # Options: low_latency, balanced, stable
+    
+    # Audio queue sizing (dynamic) - adjusted by latency mode
     audio_queue_min_size: int = 50
     audio_queue_max_size: int = 200
     audio_queue_default_size: int = 100
@@ -219,6 +228,17 @@ class MemoryConfig:
     # Performance monitoring
     enable_performance_metrics: bool = True
     latency_warning_threshold_ms: float = 500.0
+    
+    def get_queue_size_for_mode(self) -> int:
+        """Get optimal queue size based on latency mode."""
+        mode_sizes = {
+            "low_latency": 25,   # ~1-1.5s buffer, minimal latency
+            "balanced": 60,       # ~2-3s buffer, good balance
+            "stable": 100         # ~4-5s buffer, maximum stability
+        }
+        size = mode_sizes.get(self.latency_mode, 60)
+        logger.debug(f"Queue size for {self.latency_mode} mode: {size}")
+        return size
     
     def get_dynamic_queue_size(self, current_usage_percent: float) -> int:
         """
