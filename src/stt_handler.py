@@ -8,14 +8,6 @@ import re
 import threading
 from RealtimeSTT import AudioToTextRecorder
 
-from datetime import datetime
-import logging
-import asyncio
-import concurrent.futures
-import re
-import threading
-from RealtimeSTT import AudioToTextRecorder
-
 # Configure logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
@@ -24,16 +16,17 @@ logger = logging.getLogger(__name__)
 class STTHandler:
     """Full-duplex STT with continuous real-time transcription."""
     
+    # Pre-compiled regex patterns for better performance (no need to compile on every call)
     CORRECTIONS = {
-        r'\b(Shambla Tech|Shambla|Shamlataq|Shamlaq|Shamlata|Samba|Sharma Tech)\b': 'Shamla Tech',
-        r'\b(eye services?|I services?|A I services?)\b': 'AI services',
-        r'\b(A P I|ay pee eye|a p eye)\b': 'API',
-        r'\b(block ?chain)\b': 'blockchain',
-        r'\b(crypto ?currency|cripto)\b': 'cryptocurrency',
-        r'\bwanna\b': 'want to',
-        r'\bgonna\b': 'going to',
-        r'\bgotta\b': 'got to',
-        r'\blemme\b': 'let me',
+        re.compile(r'\b(Shambla Tech|Shambla|Shamlataq|Shamlaq|Shamlata|Samba|Sharma Tech)\b', re.IGNORECASE): 'Shamla Tech',
+        re.compile(r'\b(eye services?|I services?|A I services?)\b', re.IGNORECASE): 'AI services',
+        re.compile(r'\b(A P I|ay pee eye|a p eye)\b', re.IGNORECASE): 'API',
+        re.compile(r'\b(block ?chain)\b', re.IGNORECASE): 'blockchain',
+        re.compile(r'\b(crypto ?currency|cripto)\b', re.IGNORECASE): 'cryptocurrency',
+        re.compile(r'\bwanna\b', re.IGNORECASE): 'want to',
+        re.compile(r'\bgonna\b', re.IGNORECASE): 'going to',
+        re.compile(r'\bgotta\b', re.IGNORECASE): 'got to',
+        re.compile(r'\blemme\b', re.IGNORECASE): 'let me',
     }
     
     def __init__(self, mode: str = "balanced"):
@@ -71,8 +64,9 @@ class STTHandler:
             return text
         
         original = text
+        # Use pre-compiled regex patterns
         for pattern, replacement in self.CORRECTIONS.items():
-            text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
+            text = pattern.sub(replacement, text)
         
         if original != text:
             logger.debug(f"🔧 Corrected: '{original}' → '{text}'")
@@ -177,9 +171,19 @@ class STTHandler:
             self.last_completed_text = ""
             self.clear_realtime_text()
             
-            # CRITICAL: Run blocking .text() in thread pool
+            # CRITICAL: Run blocking .text() in thread pool with timeout
             loop = asyncio.get_event_loop()
-            text = await loop.run_in_executor(None, self.recorder.text)
+            try:
+                # Use config value for timeout
+                from config import get_config
+                timeout = get_config().stt.transcription_timeout
+                text = await asyncio.wait_for(
+                    loop.run_in_executor(None, self.recorder.text),
+                    timeout=timeout
+                )
+            except asyncio.TimeoutError:
+                logger.error(f"❌ STT timeout after {timeout} seconds - no speech detected")
+                return ""
             
             latency = (asyncio.get_event_loop().time() - start_time) * 1000
             

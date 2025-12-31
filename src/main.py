@@ -1,6 +1,7 @@
 # main.py - FULL-DUPLEX VERSION with Centralized Config
 import warnings
 import logging
+from collections import deque
 
 # Suppress unwanted warnings and errors BEFORE any other imports
 warnings.filterwarnings("ignore", category=DeprecationWarning)
@@ -43,20 +44,21 @@ class ConversationManager:
     """Manages conversation state and error recovery."""
     
     def __init__(self, max_history: int = 10):
-        self.history = []
+        # Use deque for O(1) append and automatic size management
+        self.history = deque(maxlen=max_history)
         self.max_history = max_history
         self.turn_count = 0
         self.error_count = 0
         self.max_consecutive_errors = 3
     
     def add_turn(self, role: str, content: str):
+        # Deque automatically removes oldest when maxlen exceeded
         self.history.append(f"{role}: {content}")
-        if len(self.history) > self.max_history:
-            self.history = [self.history[0]] + self.history[-(self.max_history-1):]
         self.turn_count += 1
     
     def get_history(self) -> list:
-        return self.history.copy()
+        # Convert deque to list for compatibility
+        return list(self.history)
     
     def record_error(self):
         self.error_count += 1
@@ -246,16 +248,35 @@ async def main():
         while loop_count < max_turns:
             loop_count += 1
             
-            should_continue, should_exit = await handle_conversation_turn(
-                stt_handler, llm_handler, tts_handler, conversation_manager
-            )
-            
-            if should_exit:
-                print("\n👋 Thank you for calling Shamla Tech!")
-                break
-            
-            if not should_continue:
-                break
+            try:
+                should_continue, should_exit = await handle_conversation_turn(
+                    stt_handler, llm_handler, tts_handler, conversation_manager
+                )
+                
+                if should_exit:
+                    print("\n👋 Thank you for calling Shamla Tech!")
+                    break
+                
+                if not should_continue:
+                    break
+                
+                # Reset error count on successful turn
+                conversation_manager.reset_errors()
+                
+            except Exception as e:
+                logger.error(f"❌ Turn {loop_count} error: {e}", exc_info=True)
+                conversation_manager.record_error()
+                
+                if conversation_manager.should_abort():
+                    print("\n❌ Too many consecutive errors. Exiting...")
+                    tts_handler.speak("I'm having trouble right now. Please try again later.", enable_barge_in=False)
+                    tts_handler.wait_for_completion(timeout=10.0)
+                    break
+                
+                # Continue to next turn after brief pause
+                print("⚠️ Error occurred, continuing...")
+                await asyncio.sleep(1.0)
+                continue
             
             await asyncio.sleep(0.1)
         
@@ -293,6 +314,12 @@ async def main():
                 await stt_handler.stop_listening()
         except Exception as e:
             logger.error(f"STT cleanup error: {e}")
+        
+        try:
+            if llm_handler:
+                await llm_handler.shutdown()
+        except Exception as e:
+            logger.error(f"LLM cleanup error: {e}")
         
         print("✅ Shutdown complete")
 

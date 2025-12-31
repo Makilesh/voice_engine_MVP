@@ -55,7 +55,9 @@ class TTSHandler:
             
             # Barge-in monitoring
             self.last_seen_realtime_text = ""
-            self.barge_in_sensitivity = 2  # Minimum chars to trigger
+            # Use config for sensitivity
+            from config import get_config
+            self.barge_in_sensitivity = get_config().tts.barge_in_min_chars
             
             # Async event loop for Cartesia (if needed)
             self.cartesia_loop = None
@@ -145,14 +147,14 @@ class TTSHandler:
             # Get real-time STT text
             realtime_text = self.main_stt.get_realtime_text()
             
-            # Detect new speech
-            if realtime_text and len(realtime_text) >= self.barge_in_sensitivity:
-                if realtime_text != self.last_seen_realtime_text:
-                    logger.info(f"🎤 Barge-in detected: {realtime_text[:30]}...")
-                    with self.state_lock:
+            # Detect new speech (thread-safe)
+            with self.state_lock:
+                if realtime_text and len(realtime_text) >= self.barge_in_sensitivity:
+                    if realtime_text != self.last_seen_realtime_text:
+                        logger.info(f"🎤 Barge-in detected: {realtime_text[:30]}...")
                         self.barge_in_detected = True
-                    self.last_seen_realtime_text = realtime_text
-                    return True
+                        self.last_seen_realtime_text = realtime_text
+                        return True
             
             return False
             
@@ -193,26 +195,29 @@ class TTSHandler:
                 try:
                     realtime_text = self.main_stt.get_realtime_text()
                     
-                    if realtime_text and len(realtime_text) > self.barge_in_sensitivity:
-                        if realtime_text != self.last_seen_realtime_text:
-                            consecutive_detections += 1
-                            
-                            if consecutive_detections >= min_consecutive:
-                                logger.info(f"🛑 Barge-in: {realtime_text[:30]}...")
-                                with self.state_lock:
-                                    self.barge_in_detected = True
-                                self.stop_event.set()
+                    # Thread-safe access to last_seen_realtime_text
+                    with self.state_lock:
+                        if realtime_text and len(realtime_text) > self.barge_in_sensitivity:
+                            if realtime_text != self.last_seen_realtime_text:
+                                consecutive_detections += 1
                                 
-                                if self.stream:
-                                    try:
-                                        self.stream.stop()
-                                    except Exception:
-                                        pass
-                                break
+                                if consecutive_detections >= min_consecutive:
+                                    logger.info(f"🛑 Barge-in: {realtime_text[:30]}...")
+                                    self.barge_in_detected = True
+                                    self.last_seen_realtime_text = realtime_text
+                                    self.stop_event.set()
+                                    
+                                    if self.stream:
+                                        try:
+                                            self.stream.stop()
+                                        except (RuntimeError, AttributeError) as e:
+                                            logger.debug(f"Stream stop error during barge-in (non-critical): {e}")
+                                    break
+                            else:
+                                consecutive_detections = max(0, consecutive_detections - 1)
                         else:
-                            consecutive_detections = max(0, consecutive_detections - 1)
-                    
-                    self.last_seen_realtime_text = realtime_text
+                            # Update last_seen under lock even when no match
+                            self.last_seen_realtime_text = realtime_text
                 except Exception as e:
                     logger.warning(f"Monitor error: {e}")
                 
@@ -259,6 +264,20 @@ class TTSHandler:
               speed: float = 1.0) -> str:
         """Speak with instant barge-in detection."""
         try:
+            # Input validation
+            if not text or not isinstance(text, str):
+                logger.warning("Invalid input: empty or non-string text")
+                return ""
+            
+            if len(text) > 5000:
+                logger.warning(f"Text too long: {len(text)} chars, truncating to 5000")
+                text = text[:5000]
+            
+            # Validate speed parameter
+            if not isinstance(speed, (int, float)) or speed <= 0 or speed > 3.0:
+                logger.warning(f"Invalid speed {speed}, using 1.0")
+                speed = 1.0
+            
             self.is_barge_in_enabled = enable_barge_in
             
             # Clear STT buffer before speaking
@@ -361,8 +380,8 @@ class TTSHandler:
             if voice != "default":
                 try:
                     self.engine.set_voice(voice)
-                except Exception:
-                    pass
+                except (AttributeError, ValueError) as e:
+                    logger.debug(f"Voice change failed (non-critical): {e}")
             
             self._play_system_engine(text)
             return "audio_playing"
@@ -461,8 +480,8 @@ class TTSHandler:
                 if hasattr(self, 'stream') and self.stream:
                     try:
                         self.stream.stop()
-                    except Exception:
-                        pass
+                    except (RuntimeError, AttributeError) as e:
+                        logger.debug(f"Stream stop error during shutdown (non-critical): {e}")
                     self.stream = None
                 
                 self.engine = None

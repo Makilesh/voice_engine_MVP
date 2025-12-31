@@ -6,6 +6,7 @@ import httpx
 import random
 import re
 import time
+from functools import lru_cache
 from dotenv import load_dotenv
 from typing import Dict, Optional
 from config import get_config
@@ -73,18 +74,26 @@ class ConversationalPersonality:
 class SentimentAnalyzer:
     """Simple sentiment detection for tone adjustment."""
     
-    POSITIVE_WORDS = ['great', 'awesome', 'excellent', 'love', 'fantastic', 'happy', 'thanks', 'perfect']
-    NEGATIVE_WORDS = ['frustrated', 'annoyed', 'upset', 'confused', 'problem', 'issue', 'broken', 'help']
-    URGENT_WORDS = ['urgent', 'asap', 'quickly', 'immediately', 'emergency', 'now']
+    # Use sets for O(1) lookup instead of O(n) list iteration
+    POSITIVE_WORDS = {'great', 'awesome', 'excellent', 'love', 'fantastic', 'happy', 'thanks', 'perfect', 'wonderful', 'amazing'}
+    NEGATIVE_WORDS = {'frustrated', 'annoyed', 'upset', 'confused', 'problem', 'issue', 'broken', 'help', 'bad', 'terrible', 'wrong'}
+    URGENT_WORDS = {'urgent', 'asap', 'quickly', 'immediately', 'emergency', 'now', 'fast', 'hurry'}
+    
+    # Pre-compile regex pattern for word boundaries
+    _word_pattern = re.compile(r'\b\w+\b')
     
     @staticmethod
     def analyze(text: str) -> Dict:
         """Returns sentiment and intensity."""
         text_lower = text.lower()
         
-        positive_count = sum(1 for word in SentimentAnalyzer.POSITIVE_WORDS if word in text_lower)
-        negative_count = sum(1 for word in SentimentAnalyzer.NEGATIVE_WORDS if word in text_lower)
-        urgent_count = sum(1 for word in SentimentAnalyzer.URGENT_WORDS if word in text_lower)
+        # Extract words once using pre-compiled regex
+        words = set(SentimentAnalyzer._word_pattern.findall(text_lower))
+        
+        # Use set intersection for fast lookup
+        positive_count = len(words & SentimentAnalyzer.POSITIVE_WORDS)
+        negative_count = len(words & SentimentAnalyzer.NEGATIVE_WORDS)
+        urgent_count = len(words & SentimentAnalyzer.URGENT_WORDS)
         
         if urgent_count > 0:
             sentiment = 'urgent'
@@ -138,9 +147,19 @@ class LLMHandler:
     async def process_text(self, text: str) -> str:
         """Process text with sentiment-aware response (FAST mode)."""
         try:
+            # Input validation
+            if not text or not isinstance(text, str):
+                logger.warning("Invalid input: empty or non-string text")
+                return self.personality.get_random_error()
+            
+            if len(text) > 1000:
+                logger.warning(f"Input too long: {len(text)} chars, truncating to 1000")
+                text = text[:1000]
+            
             sentiment = self.sentiment_analyzer.analyze(text)
             processed_text = self._preprocess_transcription(text)
-            system_prompt = self._build_dynamic_system_prompt(sentiment)
+            # Pass sentiment as string key for LRU cache
+            system_prompt = self._build_dynamic_system_prompt(sentiment['sentiment'])
             
             payload = {
                 "model": "gpt-4o-mini",
@@ -189,13 +208,26 @@ class LLMHandler:
     async def process_text_with_history(self, text: str, conversation_history: list) -> str:
         """Process with context awareness (optimized for voice)."""
         try:
+            # Input validation
+            if not text or not isinstance(text, str):
+                logger.warning("Invalid input: empty or non-string text")
+                return self.personality.get_random_error()
+            
+            if len(text) > 1000:
+                logger.warning(f"Input too long: {len(text)} chars, truncating to 1000")
+                text = text[:1000]
+            
+            if not isinstance(conversation_history, list):
+                logger.warning("Invalid conversation_history, using empty list")
+                conversation_history = []
+            
             self.interaction_count += 1
             
             sentiment = self.sentiment_analyzer.analyze(text)
             processed_text = self._preprocess_transcription(text)
             
-            # Build messages
-            system_prompt = self._build_dynamic_system_prompt(sentiment, has_history=True)
+            # Build messages (pass sentiment as string key for LRU cache)
+            system_prompt = self._build_dynamic_system_prompt(sentiment['sentiment'], has_history=True)
             messages = [{"role": "system", "content": system_prompt}]
             
             # Add conversation history (last 6 exchanges for speed)
@@ -269,8 +301,14 @@ class LLMHandler:
         
         return processed.strip()
 
-    def _build_dynamic_system_prompt(self, sentiment: Dict, has_history: bool = False) -> str:
-        """Creates adaptive system prompts (OPTIMIZED for voice)."""
+    @lru_cache(maxsize=16)
+    def _build_dynamic_system_prompt(self, sentiment_key: str, has_history: bool = False) -> str:
+        """Creates adaptive system prompts with caching (OPTIMIZED for voice).
+        
+        Args:
+            sentiment_key: String key like 'urgent', 'negative', 'positive', 'neutral'
+            has_history: Whether conversation history exists
+        """
         
         base = """You are Alex, a warm AI voice assistant for Shamla Tech.
 
@@ -287,11 +325,11 @@ About Shamla Tech:
 CRITICAL: Your response will be spoken aloud. Keep it concise and natural."""
         
         # Tone modifiers (shortened)
-        if sentiment['sentiment'] == 'urgent':
+        if sentiment_key == 'urgent':
             tone = "\nTONE: User seems urgent - be direct and efficient."
-        elif sentiment['sentiment'] == 'negative':
+        elif sentiment_key == 'negative':
             tone = "\nTONE: User seems frustrated - be patient and reassuring."
-        elif sentiment['sentiment'] == 'positive':
+        elif sentiment_key == 'positive':
             tone = "\nTONE: User is happy - match their energy!"
         else:
             tone = "\nTONE: Standard friendly conversation."
@@ -432,7 +470,8 @@ CRITICAL: Your response will be spoken aloud. Keep it concise and natural."""
             "max_tokens": max_tokens,
             "top_p": 0.9,
             "frequency_penalty": 0.3,
-            "presence_penalty": 0.2
+            "presence_penalty": 0.2,
+            "stream": False
         }
         
         headers = {
@@ -449,6 +488,92 @@ CRITICAL: Your response will be spoken aloud. Keep it concise and natural."""
         
         result = response.json()
         return result['choices'][0]['message']['content'].strip()
+    
+    async def _call_openai_streaming(
+        self,
+        messages: list,
+        max_tokens: int,
+        temperature: float,
+        callback
+    ) -> Optional[str]:
+        """Call OpenAI API with streaming for reduced latency."""
+        import json
+        
+        payload = {
+            "model": self.config.llm.openai_model,
+            "messages": messages,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "top_p": 0.9,
+            "frequency_penalty": 0.3,
+            "presence_penalty": 0.2,
+            "stream": True
+        }
+        
+        headers = {
+            "Authorization": f"Bearer {self.config.api.openai_api_key}",
+            "Content-Type": "application/json"
+        }
+        
+        full_response = ""
+        sentence_buffer = ""
+        
+        try:
+            async with self.client.stream(
+                "POST",
+                self.config.api.openai_base_url,
+                json=payload,
+                headers=headers,
+                timeout=self.config.llm.request_timeout
+            ) as response:
+                response.raise_for_status()
+                
+                async for line in response.aiter_lines():
+                    if not line or line == "data: [DONE]":
+                        continue
+                    
+                    if line.startswith("data: "):
+                        try:
+                            json_str = line[6:]
+                            chunk = json.loads(json_str)
+                            
+                            if 'choices' in chunk and len(chunk['choices']) > 0:
+                                delta = chunk['choices'][0].get('delta', {})
+                                content = delta.get('content', '')
+                                
+                                if content:
+                                    full_response += content
+                                    sentence_buffer += content
+                                    
+                                    # Check for sentence boundaries
+                                    if any(punct in content for punct in ['. ', '? ', '! ', '\n']):
+                                        sentences = re.split(r'([.!?]\s+)', sentence_buffer)
+                                        
+                                        # Send complete sentences
+                                        for i in range(0, len(sentences) - 1, 2):
+                                            if i + 1 < len(sentences):
+                                                complete_sentence = sentences[i] + sentences[i + 1]
+                                                if complete_sentence.strip():
+                                                    await callback(complete_sentence.strip())
+                                        
+                                        # Keep incomplete sentence
+                                        if len(sentences) % 2 == 1:
+                                            sentence_buffer = sentences[-1]
+                                        else:
+                                            sentence_buffer = ""
+                        
+                        except json.JSONDecodeError:
+                            continue
+                
+                # Send remaining text
+                if sentence_buffer.strip():
+                    await callback(sentence_buffer.strip())
+            
+            return full_response.strip()
+            
+        except Exception as e:
+            logger.warning(f"OpenAI streaming error: {e}")
+            return None
     
     async def _call_gemini(
         self,

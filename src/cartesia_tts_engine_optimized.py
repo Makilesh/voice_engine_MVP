@@ -196,12 +196,12 @@ class CartesiaTTSEngine:
                 try:
                     if self.audio_stream.is_active():
                         self.audio_stream.stop_stream()
-                except:
-                    pass
+                except (OSError, AttributeError) as e:
+                    logger.debug(f"Stop stream error (expected during cleanup): {e}")
                 try:
                     self.audio_stream.close()
-                except:
-                    pass
+                except (OSError, AttributeError) as e:
+                    logger.debug(f"Close stream error (expected during cleanup): {e}")
                 self.audio_stream = None
             logger.debug("🧹 Audio output cleaned up")
         except Exception as e:
@@ -466,8 +466,8 @@ class CartesiaTTSEngine:
                         break
                 try:
                     self.audio_queue.put("STOP", timeout=0.1)
-                except:
-                    pass
+                except (queue.Full, ValueError) as e:
+                    logger.debug(f"Queue put error during stop (non-critical): {e}")
             
             with self.state_lock:
                 self.state = PlaybackState.STOPPED
@@ -581,8 +581,8 @@ class CartesiaTTSEngine:
                 mem_info = self.process.memory_info()
                 stats["memory_mb"] = mem_info.rss / (1024 * 1024)
                 stats["memory_warnings"] = self.memory_warnings
-            except:
-                pass
+            except (psutil.NoSuchProcess, psutil.AccessDenied) as e:
+                logger.debug(f"Memory stats unavailable: {e}")
         
         return stats
     
@@ -602,15 +602,15 @@ class CartesiaTTSEngine:
             if self.pyaudio_instance:
                 try:
                     self.pyaudio_instance.terminate()
-                except:
-                    pass
+                except (OSError, AttributeError) as e:
+                    logger.debug(f"PyAudio terminate error (non-critical): {e}")
                 self.pyaudio_instance = None
             
             if self.client:
                 try:
                     await self.client.close()
-                except:
-                    pass
+                except (RuntimeError, AttributeError) as e:
+                    logger.debug(f"Client close error (non-critical): {e}")
                 self.client = None
             
             logger.info("✅ Cartesia TTS cleanup complete")

@@ -43,16 +43,31 @@ class APIConfig:
     groq_base_url: str = "https://api.groq.com/openai/v1/chat/completions"
     
     def validate(self) -> bool:
-        """Validate required API keys."""
+        """Validate required API keys and configuration values."""
         errors = []
+        warnings = []
         
         # At least one LLM API key or Ollama required
         if not any([self.openai_api_key, self.gemini_api_key, self.groq_api_key, self.ollama_enabled]):
             errors.append("At least one LLM API key or Ollama required (OpenAI/Gemini/Groq/Ollama)")
         
+        # Validate API key formats (basic check)
+        if self.openai_api_key and not self.openai_api_key.startswith('sk-'):
+            warnings.append("OpenAI API key should start with 'sk-'")
+        
+        if self.groq_api_key and not self.groq_api_key.startswith('gsk_'):
+            warnings.append("Groq API key should start with 'gsk_'")
+        
         # TTS API key required
         if not self.cartesia_api_key:
             errors.append("CARTESIA_API_KEY required for TTS")
+        
+        if self.cartesia_api_key and not self.cartesia_api_key.startswith('sk_car_'):
+            warnings.append("Cartesia API key should start with 'sk_car_'")
+        
+        # Log warnings
+        for warning in warnings:
+            logger.warning(f"⚠️ Config validation: {warning}")
         
         if errors:
             for error in errors:
@@ -148,6 +163,11 @@ class TTSConfig:
     channels: int = 1
     chunk_size: int = 1024
     
+    # Barge-in settings
+    barge_in_startup_buffer: float = 0.15  # Ignore first 150ms of playback
+    barge_in_check_interval: float = 0.02  # Check every 20ms
+    barge_in_min_chars: int = 2  # Minimum characters to trigger barge-in
+    
     # Fallback TTS (SystemEngine)
     fallback_enabled: bool = True
     fallback_voice: str = "default"
@@ -158,20 +178,21 @@ class STTConfig:
     """STT configuration."""
     
     # RealtimeSTT modes
-    mode: str = "balanced"  # Options: fast, balanced, accurate
+    mode: str = "fast"  # Options: fast, balanced, accurate (changed from balanced to fast)
     
-    # Model selection by mode
+    # Model selection by mode (optimized for lower latency)
     models = {
-        'fast': 'tiny.en',
-        'balanced': 'base.en',
-        'accurate': 'small.en'
+        'fast': 'tiny.en',      # ~100-150ms latency (changed from tiny.en - already optimal)
+        'balanced': 'tiny.en',  # Changed from base.en to tiny.en for 100-200ms latency reduction
+        'accurate': 'base.en'   # Keep base.en for accuracy mode
     }
     
     # VAD settings
     silero_sensitivity: float = 0.5
     webrtc_sensitivity: int = 3
-    
-    def get_model(self) -> str:
+        # Timeout settings
+    transcription_timeout: float = 30.0  # Maximum time to wait for transcription
+        def get_model(self) -> str:
         """Get model for current mode."""
         return self.models.get(self.mode, 'base.en')
 
