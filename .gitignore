@@ -2,3 +2,9 @@
 /.venv
 /audio
 /src/.env
+/tests
+/src/__pycache__
+/src/audio
+/responses
+/str
+/nul
