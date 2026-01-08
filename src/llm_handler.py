@@ -179,7 +179,7 @@ class LLMHandler:
             }
             
             headers = {
-                "Authorization": f"Bearer {self.api_key}",
+                "Authorization": f"Bearer {self.config.api.openai_api_key}",
                 "Content-Type": "application/json"
             }
             
@@ -273,7 +273,7 @@ class LLMHandler:
             }
             
             headers = {
-                "Authorization": f"Bearer {self.api_key}",
+                "Authorization": f"Bearer {self.config.api.openai_api_key}",
                 "Content-Type": "application/json"
             }
             

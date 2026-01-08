@@ -202,7 +202,7 @@ async def main():
         print("Initializing FULL-DUPLEX mode...")
         
         # Initialize STT (MUST be first - continuous listening)
-        stt_handler = STTHandler(mode="balanced")
+        stt_handler = STTHandler(mode=config.stt.mode)
         await stt_handler.start_listening()
         logger.info("✅ STT: Continuous listening active")
 

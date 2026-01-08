@@ -53,11 +53,11 @@ class STTHandler:
     
     def _select_model(self, mode: str) -> str:
         models = {
-            "fast": "tiny",
-            "balanced": "small",
-            "accurate": "base"
+            "fast": "tiny.en",
+            "balanced": "tiny.en",
+            "accurate": "base.en"
         }
-        return models.get(mode, "small")
+        return models.get(mode, "tiny.en")
     
     def _apply_corrections(self, text: str) -> str:
         if not text:
@@ -113,15 +113,15 @@ class STTHandler:
                     # on_transcription_complete=on_transcription_complete,
                     realtime_model_type=self.model_name,
                     
-                    # OPTIMIZED timing
-                    realtime_processing_pause=0.08,
-                    post_speech_silence_duration=0.25,
-                    min_length_of_recording=0.3,
-                    min_gap_between_recordings=0.08,
-                    pre_recording_buffer_duration=0.15,
+                    # OPTIMIZED timing - tuned for SPEED
+                    realtime_processing_pause=0.05,  # Faster processing loop (was 0.1)
+                    post_speech_silence_duration=0.3,  # CRITICAL: Quick cutoff for instant response (was 0.7)
+                    min_length_of_recording=0.4,  # Balance speed vs noise rejection (was 0.5)
+                    min_gap_between_recordings=0.15,  # Faster re-detection (was 0.2)
+                    pre_recording_buffer_duration=0.15,  # Shorter buffer (was 0.2)
                     
-                    # VAD settings
-                    silero_sensitivity=0.5,
+                    # VAD settings - keep strict to prevent noise
+                    silero_sensitivity=0.4,  # Keep at 0.4 to filter background noise
                     silero_use_onnx=True,
                     webrtc_sensitivity=2,
                     

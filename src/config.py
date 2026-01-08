@@ -184,7 +184,7 @@ class STTConfig:
     """STT configuration."""
     
     # RealtimeSTT modes
-    mode: str = "fast"  # Options: fast, balanced, accurate (changed from balanced to fast)
+    mode: str = "fast"  # Options: fast, balanced, accurate
     
     # Model selection by mode (optimized for lower latency)
     models = {
@@ -198,7 +198,7 @@ class STTConfig:
     webrtc_sensitivity: int = 3
         # Timeout settings
     transcription_timeout: float = 30.0  # Maximum time to wait for transcription
-        def get_model(self) -> str:
+    def get_model(self) -> str:
         """Get model for current mode."""
         return self.models.get(self.mode, 'base.en')
 
