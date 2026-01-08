@@ -184,13 +184,13 @@ class STTConfig:
     """STT configuration."""
     
     # RealtimeSTT modes
-    mode: str = "fast"  # Options: fast, balanced, accurate
+    mode: str = "balanced"  # Options: fast, balanced, accurate (using 'small' model)
     
     # Model selection by mode (optimized for lower latency)
     models = {
-        'fast': 'tiny.en',      # ~100-150ms latency (changed from tiny.en - already optimal)
-        'balanced': 'tiny.en',  # Changed from base.en to tiny.en for 100-200ms latency reduction
-        'accurate': 'base.en'   # Keep base.en for accuracy mode
+        'fast': 'tiny.en',      # ~100-150ms latency, fastest
+        'balanced': 'small.en',    # ~150-250ms latency, better accuracy
+        'accurate': 'base.en'   # ~200-350ms latency, best accuracy
     }
     
     # VAD settings
@@ -208,7 +208,7 @@ class MemoryConfig:
     """Memory and performance configuration."""
     
     # Latency mode configuration
-    latency_mode: str = "balanced"  # Options: low_latency, balanced, stable
+    latency_mode: str = "low_latency"  # Options: low_latency, balanced, stable
     
     # Audio queue sizing (dynamic) - adjusted by latency mode
     audio_queue_min_size: int = 50

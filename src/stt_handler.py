@@ -54,7 +54,7 @@ class STTHandler:
     def _select_model(self, mode: str) -> str:
         models = {
             "fast": "tiny.en",
-            "balanced": "tiny.en",
+            "balanced": "small.en",
             "accurate": "base.en"
         }
         return models.get(mode, "tiny.en")
