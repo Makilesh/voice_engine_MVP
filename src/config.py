@@ -184,7 +184,7 @@ class STTConfig:
     """STT configuration."""
     
     # RealtimeSTT modes
-    mode: str = "balanced"  # Options: fast, balanced, accurate (using 'small' model)
+    mode: str = "accurate"  # Options: fast, balanced, accurate (using base.en for production)
     
     # Model selection by mode (optimized for lower latency)
     models = {
