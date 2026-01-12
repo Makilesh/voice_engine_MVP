@@ -182,8 +182,8 @@ class TTSHandler:
                 return
             
             playback_start = time.time()
-            tts_startup_buffer = 0.15  # Ignore first 150ms
-            check_interval = 0.02  # Check every 20ms
+            tts_startup_buffer = 0.05  # Reduced from 0.15s to 50ms for faster response
+            check_interval = 0.01  # Check every 10ms (was 20ms) for quicker detection
             
             # Safety limits to prevent infinite loops
             max_monitor_duration = 60.0  # Maximum 60 seconds
@@ -194,7 +194,7 @@ class TTSHandler:
             
             self.last_seen_realtime_text = ""
             consecutive_detections = 0
-            min_consecutive = 2  # Need 2 consecutive detections (40ms)
+            min_consecutive = 1  # Instant detection (was 2, causing 40ms delay)
             
             while not self.stop_event.is_set():
                 iterations += 1
