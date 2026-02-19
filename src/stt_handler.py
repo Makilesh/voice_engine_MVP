@@ -129,22 +129,33 @@ class STTHandler:
                         webrtc_sensitivity=2,
                         
                         beam_size=1,  # Fastest: near-realtime (was 3)
-                        initial_prompt="Shamla Tech, AI, blockchain, cryptocurrency, API",
+                        initial_prompt="Shamla Tech AI services, blockchain, cryptocurrency, DeFi, API, machine learning, automation",
                         use_microphone=True
                     )
                 
-                # Try CUDA first (RTX 5070 Ti), fall back to CPU if CUDA runtime not installed
-                try:
-                    import ctranslate2
-                    # get_cuda_device_count() is instant — returns 0 if CUDA runtime DLLs aren't loaded
-                    cuda_count = getattr(ctranslate2, 'get_cuda_device_count', lambda: 0)()
-                    if cuda_count > 0 and "float16" in ctranslate2.get_supported_compute_types("cuda"):
-                        logger.info(f"🚀 Whisper: using CUDA float16 ({cuda_count} GPU(s) detected)")
+                # Try CUDA first (RTX 5070 Ti), fall back to CPU if CUDA runtime not installed.
+                # Use ctypes DLL check: instant, no subprocess spawned.
+                # get_cuda_device_count() only uses NVML (driver API) — not a reliable compute check.
+                def _cuda_runtime_available() -> bool:
+                    import ctypes
+                    for dll in ["cudart64_12.dll", "cudart64_120.dll", "cudart64_115.dll", "cublas64_12.dll"]:
+                        try:
+                            ctypes.WinDLL(dll)
+                            return True
+                        except OSError:
+                            continue
+                    return False
+
+                if _cuda_runtime_available():
+                    logger.info("🚀 Whisper: CUDA runtime found — using float16 (RTX 5070 Ti)")
+                    try:
                         return _build_recorder("cuda", "float16")
-                    raise RuntimeError(f"CUDA device count: {cuda_count}")
-                except Exception as cuda_err:
-                    logger.info(f"ℹ️ Whisper: CUDA unavailable ({cuda_err.__class__.__name__}: {cuda_err}), using CPU int8")
-                    return _build_recorder("cpu", "int8")
+                    except Exception as e:
+                        logger.warning(f"⚠️ CUDA recorder failed ({e}), falling back to CPU int8")
+
+                logger.info("ℹ️ Whisper: CUDA runtime DLLs not found — using CPU int8. "
+                            "To enable GPU: pip install ctranslate2[cuda12]")
+                return _build_recorder("cpu", "int8")
             
             with concurrent.futures.ThreadPoolExecutor() as executor:
                 future = executor.submit(init_recorder)

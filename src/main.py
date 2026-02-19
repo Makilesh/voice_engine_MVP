@@ -131,6 +131,10 @@ async def handle_conversation_turn(stt_handler, llm_handler, tts_handler,
                    f"LLM={llm_time*1000:.0f}ms, TTS={tts_time*1000:.0f}ms, "
                    f"Total={total_time*1000:.0f}ms")
         
+        # Warn only on slow system processing (LLM + TTS), not user speaking time
+        if llm_time + tts_time > 3.0:
+            logger.warning(f"⚠️ Slow processing: LLM={llm_time*1000:.0f}ms TTS={tts_time*1000:.0f}ms")
+        
         # Step 4: Handle barge-in
         if tts_handler.is_barge_in_detected():
             print("🎤 You interrupted!")
@@ -165,9 +169,6 @@ async def handle_conversation_turn(stt_handler, llm_handler, tts_handler,
                 # Speak response (allow barge-in again)
                 tts_handler.speak(interruption_response, enable_barge_in=True)
                 tts_handler.wait_for_completion(timeout=30.0)
-        
-        if total_time > 3.0:
-            logger.warning(f"⚠️ Slow turn: {total_time:.1f}s")
         
         return True, False
         
