@@ -18,7 +18,7 @@ class STTHandler:
     
     # Pre-compiled regex patterns for better performance (no need to compile on every call)
     CORRECTIONS = {
-        re.compile(r'\b(Shambla Tech|Shambla|Shamlataq|Shamlaq|Shamlata|Samba|Sharma Tech)\b', re.IGNORECASE): 'Shamla Tech',
+        re.compile(r'\b(Shambhata|Shambla Tech|Shambla|Shamlataq|Shamlaq|Shamlata|Samba|Sharma Tech|Sham Tech|Shamlata Tech)\b', re.IGNORECASE): 'Shamla Tech',
         re.compile(r'\b(eye services?|I services?|A I services?)\b', re.IGNORECASE): 'AI services',
         re.compile(r'\b(A P I|ay pee eye|a p eye)\b', re.IGNORECASE): 'API',
         re.compile(r'\b(block ?chain)\b', re.IGNORECASE): 'blockchain',
@@ -118,7 +118,7 @@ class STTHandler:
                         
                         # PRODUCTION OPTIMIZED - Fast response
                         realtime_processing_pause=0.1,
-                        post_speech_silence_duration=0.5,  # Natural pause detection
+                        post_speech_silence_duration=0.4,  # Wait before considering speech done (was 0.5s)
                         min_length_of_recording=0.5,
                         min_gap_between_recordings=0.2,
                         pre_recording_buffer_duration=0.2,
@@ -136,12 +136,14 @@ class STTHandler:
                 # Try CUDA first (RTX 5070 Ti), fall back to CPU if CUDA runtime not installed
                 try:
                     import ctranslate2
-                    if "float16" in ctranslate2.get_supported_compute_types("cuda"):
-                        logger.info("🚀 Whisper: using CUDA float16 (RTX 5070 Ti)")
+                    # get_cuda_device_count() is instant — returns 0 if CUDA runtime DLLs aren't loaded
+                    cuda_count = getattr(ctranslate2, 'get_cuda_device_count', lambda: 0)()
+                    if cuda_count > 0 and "float16" in ctranslate2.get_supported_compute_types("cuda"):
+                        logger.info(f"🚀 Whisper: using CUDA float16 ({cuda_count} GPU(s) detected)")
                         return _build_recorder("cuda", "float16")
-                    raise RuntimeError("CUDA float16 not in supported types")
+                    raise RuntimeError(f"CUDA device count: {cuda_count}")
                 except Exception as cuda_err:
-                    logger.info(f"ℹ️ Whisper: CUDA unavailable ({cuda_err.__class__.__name__}), using CPU int8")
+                    logger.info(f"ℹ️ Whisper: CUDA unavailable ({cuda_err.__class__.__name__}: {cuda_err}), using CPU int8")
                     return _build_recorder("cpu", "int8")
             
             with concurrent.futures.ThreadPoolExecutor() as executor:

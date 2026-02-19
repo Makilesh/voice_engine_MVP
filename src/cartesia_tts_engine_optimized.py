@@ -452,7 +452,7 @@ class CartesiaTTSEngine:
     def stop_playback(self):
         """Immediately stop playback."""
         try:
-            logger.info("🛑 Stopping Cartesia playback")
+            logger.debug("🛑 Stopping Cartesia playback")
             self.stop_event.set()
             
             # Send STOP signal to consumer
