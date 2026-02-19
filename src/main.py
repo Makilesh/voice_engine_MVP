@@ -24,20 +24,8 @@ warnings.filterwarnings(
     message="play_async() called while already playing audio, skipping"
 )
 
-# Load and validate configuration first
-try:
-    config = load_and_validate_config()
-except ValueError as e:
-    print(f"❌ Configuration error: {e}")
-    print("Please check your .env file and ensure all required API keys are set.")
-    exit(1)
-
-# Configure logging
-logging.basicConfig(
-    level=getattr(logging, config.log_level),
-    format='%(asctime)s - %(levelname)s - %(message)s'
-)
-
+# NOTE: config loading is intentionally deferred to if __name__ == '__main__'
+# to prevent re-execution in multiprocessing worker processes (Windows spawn)
 logger = logging.getLogger(__name__)
 
 class ConversationManager:
@@ -202,7 +190,7 @@ async def main():
         print("Initializing FULL-DUPLEX mode...")
         
         # Initialize STT (MUST be first - continuous listening)
-        stt_handler = STTHandler(mode=config.stt.mode)
+        stt_handler = STTHandler(mode=get_config().stt.mode)
         await stt_handler.start_listening()
         logger.info("✅ STT: Continuous listening active")
 
@@ -334,6 +322,23 @@ async def main():
 
 
 if __name__ == "__main__":
+    import multiprocessing
+    multiprocessing.freeze_support()  # Required for Windows multiprocessing
+
+    # Load and validate config ONLY in the main process (not in spawned workers)
+    try:
+        config = load_and_validate_config()
+    except ValueError as e:
+        print(f"❌ Configuration error: {e}")
+        print("Please check your .env file and ensure all required API keys are set.")
+        exit(1)
+
+    # Configure logging ONLY in the main process
+    logging.basicConfig(
+        level=getattr(logging, config.log_level),
+        format='%(asctime)s - %(levelname)s - %(message)s'
+    )
+
     print("""
 ╔═══════════════════════════════════════════════════╗
 ║     🎙 Shamla Tech AI Voice Assistant v2.1       ║

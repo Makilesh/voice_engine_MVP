@@ -593,7 +593,19 @@ class CartesiaTTSEngine:
             # Stop consumer loop
             self.consumer_running = False
             self.stop_playback()
-            
+
+            # Cancel all pending async tasks (websocket keepalives etc.)
+            # This prevents "Task was destroyed but it is pending" on shutdown
+            current_task = asyncio.current_task()
+            pending = [
+                t for t in asyncio.all_tasks()
+                if t is not current_task and not t.done()
+            ]
+            for task in pending:
+                task.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+
             # Wait for consumer thread
             if self.consumer_thread and self.consumer_thread.is_alive():
                 self.consumer_thread.join(timeout=2.0)

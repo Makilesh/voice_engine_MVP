@@ -125,7 +125,7 @@ class STTHandler:
                     silero_use_onnx=True,
                     webrtc_sensitivity=2,
                     
-                    beam_size=5,  # Better accuracy (was 3)
+                    beam_size=3,  # Balanced speed/accuracy (was 5 - too slow for real-time)
                     initial_prompt="Shamla Tech, AI, blockchain, cryptocurrency, API",
                     use_microphone=True
                 )

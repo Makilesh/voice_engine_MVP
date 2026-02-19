@@ -80,14 +80,15 @@ class APIConfig:
     def get_llm_priority(self) -> list:
         """Get LLM providers in priority order."""
         providers = []
-        if self.openai_api_key:
-            providers.append('openai')
+        # Priority: Gemini first, Ollama second, then cloud fallbacks
         if self.gemini_api_key:
             providers.append('gemini')
-        if self.groq_api_key:
-            providers.append('groq')
         if self.ollama_enabled:
             providers.append('ollama')
+        if self.openai_api_key:
+            providers.append('openai')
+        if self.groq_api_key:
+            providers.append('groq')
         return providers
 
 
@@ -109,7 +110,7 @@ class LLMConfig:
     groq_max_tokens: int = 120
     
     # Third fallback (Ollama - local)
-    ollama_model: str = "llama3.1:latest"  # 8B model
+    ollama_model: str = field(default_factory=lambda: os.getenv('OLLAMA_MODEL', 'llama3.1:8b'))
     ollama_max_tokens: int = 120
     
     # Timeouts

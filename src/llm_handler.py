@@ -601,31 +601,48 @@ CRITICAL: Your response will be spoken aloud. Keep it concise and natural."""
         max_tokens: int,
         temperature: float
     ) -> Optional[str]:
-        """Call Gemini API (fallback)."""
-        # Convert messages to Gemini format
+        """Call Gemini API."""
+        # Gemini requires: system_instruction separate, strict alternating user/model turns
+        system_text = ""
         contents = []
+
         for msg in messages:
             if msg['role'] == 'system':
-                # Gemini doesn't have system role, prepend to first user message
-                contents.append({"role": "user", "parts": [{"text": msg['content']}]})
+                system_text = msg['content']  # Use system_instruction field instead
             elif msg['role'] == 'user':
                 contents.append({"role": "user", "parts": [{"text": msg['content']}]})
             elif msg['role'] == 'assistant':
                 contents.append({"role": "model", "parts": [{"text": msg['content']}]})
-        
+
+        # Merge consecutive same-role turns (Gemini 400s if two user/model rows in a row)
+        merged = []
+        for turn in contents:
+            if merged and merged[-1]['role'] == turn['role']:
+                merged[-1]['parts'][0]['text'] += "\n" + turn['parts'][0]['text']
+            else:
+                merged.append(turn)
+
+        # Must start with a user turn
+        if not merged or merged[0]['role'] != 'user':
+            merged.insert(0, {"role": "user", "parts": [{"text": "Hello"}]})
+
         payload = {
-            "contents": contents,
+            "contents": merged,
             "generationConfig": {
                 "maxOutputTokens": max_tokens,
                 "temperature": temperature
             }
         }
-        
+
+        # Pass system prompt via system_instruction (correct Gemini API field)
+        if system_text:
+            payload["system_instruction"] = {"parts": [{"text": system_text}]}
+
         url = f"{self.config.api.gemini_base_url}/{self.config.llm.gemini_model}:generateContent?key={self.config.api.gemini_api_key}"
-        
+
         response = await self.client.post(url, json=payload)
         response.raise_for_status()
-        
+
         result = response.json()
         return result['candidates'][0]['content']['parts'][0]['text'].strip()
     

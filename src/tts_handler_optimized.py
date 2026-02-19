@@ -352,6 +352,9 @@ class TTSHandler:
             
             logger.info(f"🗣 Cartesia: {text[:50]}... (barge-in: {enable_barge_in})")
             
+            # Clear stop event from any previous call
+            self.stop_event.clear()
+
             # Update voice config if needed
             if speed != 1.0:
                 self.cartesia_engine.voice_config.speed = speed
@@ -457,15 +460,19 @@ class TTSHandler:
             return self.barge_in_detected
     
     def stop_playback(self):
-        """Immediately stop TTS playback."""
+        """Immediately stop TTS playback. No-op if nothing is playing."""
         try:
+            with self.state_lock:
+                if not self.is_playing:
+                    return  # Nothing playing - ignore spurious calls from STT callbacks
+
             if self.use_cartesia and self.cartesia_engine:
                 self.cartesia_engine.stop_playback()
                 logger.info("🛑 Cartesia stopped")
             elif self.stream:
                 self.stream.stop()
                 logger.info("🛑 SystemEngine stopped")
-            
+
             with self.state_lock:
                 self.barge_in_detected = True
             self.stop_event.set()
