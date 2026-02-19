@@ -62,7 +62,7 @@ class VoiceConfig:
     voice_id: str = "e07c00bc-4134-4eae-9ea4-1a55fb45746b"  # Brooke (Female, American)
     model: str = "sonic-3"  # Best quality/speed balance
     language: str = "en"
-    speed: float = 1.0
+    speed: float = 0.70
     emotion: Optional[str] = None
     
     def to_cartesia_voice(self) -> Dict[str, str]:

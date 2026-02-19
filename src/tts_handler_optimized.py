@@ -91,7 +91,7 @@ class TTSHandler:
                 voice_config=VoiceConfig(
                     voice_id=CartesiaVoices.BROOKE,
                     model="sonic-3",  # Best quality/speed balance
-                    speed=1.0
+                    speed=0.70
                 ),
                 audio_config=AudioConfig(
                     sample_rate=22050  # Cartesia optimal
