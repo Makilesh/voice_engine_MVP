@@ -95,40 +95,54 @@ class STTHandler:
                 def on_realtime_update(text: str):
                     handler_self._on_realtime_update(text)
                     
-                    # FIX: Trigger TTS stop on voice detection
-                    if handler_self.tts_stop_callback:
+                    # Only trigger barge-in stop when user is actually saying something
+                    # (not on noise or single-char spurious detections)
+                    if handler_self.tts_stop_callback and text and len(text.strip()) >= 4:
                         handler_self.tts_stop_callback()
                 
                 def on_transcription_complete(text: str):
                     handler_self._on_transcription_complete(text)
                 
-                return AudioToTextRecorder(
-                    model=self.model_name,
-                    language="en",
-                    compute_type="int8",
-                    
-                    # CRITICAL: Enable real-time callbacks
-                    enable_realtime_transcription=True,
-                    on_realtime_transcription_update=on_realtime_update,
-                    # on_transcription_complete=on_transcription_complete,
-                    realtime_model_type=self.model_name,
-                    
-                    # PRODUCTION OPTIMIZED - Natural conversation with base.en
-                    realtime_processing_pause=0.1,  # Give base.en proper processing time
-                    post_speech_silence_duration=0.5,  # Natural pause detection
-                    min_length_of_recording=0.6,  # Capture real speech, filter noise
-                    min_gap_between_recordings=0.2,  # Natural re-engagement
-                    pre_recording_buffer_duration=0.2,  # Capture speech start
-                    
-                    # VAD settings - balanced for real-world use
-                    silero_sensitivity=0.38,  # Balanced: catches speech, filters noise
-                    silero_use_onnx=True,
-                    webrtc_sensitivity=2,
-                    
-                    beam_size=3,  # Balanced speed/accuracy (was 5 - too slow for real-time)
-                    initial_prompt="Shamla Tech, AI, blockchain, cryptocurrency, API",
-                    use_microphone=True
-                )
+                def _build_recorder(device: str, compute_type: str):
+                    return AudioToTextRecorder(
+                        model=self.model_name,
+                        language="en",
+                        device=device,
+                        compute_type=compute_type,
+                        
+                        # CRITICAL: Enable real-time callbacks
+                        enable_realtime_transcription=True,
+                        on_realtime_transcription_update=on_realtime_update,
+                        # on_transcription_complete=on_transcription_complete,
+                        realtime_model_type="tiny.en",  # Tiny for real-time preview, main model for final
+                        
+                        # PRODUCTION OPTIMIZED - Fast response
+                        realtime_processing_pause=0.1,
+                        post_speech_silence_duration=0.5,  # Natural pause detection
+                        min_length_of_recording=0.5,
+                        min_gap_between_recordings=0.2,
+                        pre_recording_buffer_duration=0.2,
+                        
+                        # VAD settings - balanced for real-world use
+                        silero_sensitivity=0.38,
+                        silero_use_onnx=True,
+                        webrtc_sensitivity=2,
+                        
+                        beam_size=1,  # Fastest: near-realtime (was 3)
+                        initial_prompt="Shamla Tech, AI, blockchain, cryptocurrency, API",
+                        use_microphone=True
+                    )
+                
+                # Try CUDA first (RTX 5070 Ti), fall back to CPU if CUDA runtime not installed
+                try:
+                    import ctranslate2
+                    if "float16" in ctranslate2.get_supported_compute_types("cuda"):
+                        logger.info("🚀 Whisper: using CUDA float16 (RTX 5070 Ti)")
+                        return _build_recorder("cuda", "float16")
+                    raise RuntimeError("CUDA float16 not in supported types")
+                except Exception as cuda_err:
+                    logger.info(f"ℹ️ Whisper: CUDA unavailable ({cuda_err.__class__.__name__}), using CPU int8")
+                    return _build_recorder("cpu", "int8")
             
             with concurrent.futures.ThreadPoolExecutor() as executor:
                 future = executor.submit(init_recorder)

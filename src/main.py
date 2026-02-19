@@ -11,6 +11,13 @@ warnings.filterwarnings("ignore", module="RealtimeSTT")
 warnings.filterwarnings("ignore", category=UserWarning, module="ctranslate2")
 warnings.filterwarnings("ignore", category=UserWarning)  # Catch all UserWarnings
 
+
+class _SuppressRealtimeSTTErrors(logging.Filter):
+    """Suppress benign WinError 6 / handle-invalid errors from RealtimeSTT on shutdown."""
+    def filter(self, record: logging.LogRecord) -> bool:
+        msg = record.getMessage()
+        return "WinError 6" not in msg and "handle is invalid" not in msg.lower()
+
 from config import load_and_validate_config, get_config
 from stt_handler import STTHandler
 from llm_handler import LLMHandler
@@ -338,6 +345,8 @@ if __name__ == "__main__":
         level=getattr(logging, config.log_level),
         format='%(asctime)s - %(levelname)s - %(message)s'
     )
+    # Suppress benign WinError 6 from RealtimeSTT multiprocessing pipe on shutdown
+    logging.root.addFilter(_SuppressRealtimeSTTErrors())
 
     print("""
 ╔═══════════════════════════════════════════════════╗

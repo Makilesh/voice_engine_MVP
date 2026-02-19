@@ -80,15 +80,15 @@ class APIConfig:
     def get_llm_priority(self) -> list:
         """Get LLM providers in priority order."""
         providers = []
-        # Priority: Gemini first, Ollama second, then cloud fallbacks
-        if self.gemini_api_key:
-            providers.append('gemini')
-        if self.ollama_enabled:
-            providers.append('ollama')
-        if self.openai_api_key:
-            providers.append('openai')
+        # Priority: Groq first (fast cloud), Ollama second (local GPU), Gemini last resort
         if self.groq_api_key:
             providers.append('groq')
+        if self.ollama_enabled:
+            providers.append('ollama')
+        if self.gemini_api_key:
+            providers.append('gemini')
+        if self.openai_api_key:
+            providers.append('openai')
         return providers
 
 
@@ -219,7 +219,7 @@ class MemoryConfig:
     # Memory monitoring
     enable_memory_monitoring: bool = True
     memory_check_interval: float = 5.0  # seconds
-    memory_warning_threshold_mb: float = 500.0  # MB
+    memory_warning_threshold_mb: float = 800.0  # MB (raised from 500 - voice app baseline is ~550MB)
     memory_critical_threshold_mb: float = 1000.0  # MB
     
     # Queue management
