@@ -109,7 +109,7 @@ class KokoroTTSEngine:
         """Synchronous initialization — loads model, creates stream."""
         logger.info("⏳ Loading Kokoro-82M model (first run downloads ~170 MB)...")
         self._engine = KokoroEngine(
-            default_voice=self.voice_config.voice,
+            voice=self.voice_config.voice,
             default_speed=self.voice_config.speed,
         )
         self._stream = TextToAudioStream(self._engine)
@@ -145,20 +145,15 @@ class KokoroTTSEngine:
             self._state = PlaybackState.PLAYING
         self._stop_event.clear()
 
-        playback_done = threading.Event()
-
-        def on_stream_stop():
-            playback_done.set()
-
         try:
             # Feed text and start async playback
             self._stream.feed(text)
-            self._stream.play_async(on_audio_stream_stop=on_stream_stop)
+            self._stream.play_async()
 
             playback_start = time.time()
 
-            # Polling loop — check barge-in or natural finish
-            while not playback_done.is_set() and not self._stop_event.is_set():
+            # Polling loop — check barge-in or natural finish via is_playing()
+            while self._stream.is_playing() and not self._stop_event.is_set():
                 elapsed = time.time() - playback_start
 
                 # Barge-in check (after startup buffer)
