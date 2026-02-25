@@ -24,6 +24,16 @@ except ImportError:
 
 from cartesia_tts_engine_optimized import CartesiaTTSEngine, VoiceConfig, AudioConfig, CartesiaVoices
 
+# Try to import Kokoro TTS (optional local GPU engine)
+try:
+    from kokoro_tts_engine import KokoroTTSEngine, KokoroVoiceConfig
+    KOKORO_AVAILABLE = True
+except ImportError:
+    KOKORO_AVAILABLE = False
+    KokoroTTSEngine = None
+    KokoroVoiceConfig = None
+    logging.warning("⚠️ kokoro_tts_engine not found — Kokoro TTS unavailable")
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
@@ -34,7 +44,7 @@ logger = logging.getLogger(__name__)
 class TTSHandler:
     """TTS Handler with Cartesia AI + Barge-in Detection (<150ms)."""
     
-    def __init__(self, stt_handler=None, use_cartesia=None):
+    def __init__(self, stt_handler=None, use_kokoro: bool = True, use_cartesia=None):
         try:
             # Validate STT handler (required for barge-in)
             self.main_stt = stt_handler
@@ -45,6 +55,7 @@ class TTSHandler:
             self.use_cartesia = use_cartesia if use_cartesia is not None else (
                 os.getenv('USE_CARTESIA_TTS', 'false').lower() == 'true'
             )
+            self.use_kokoro = use_kokoro
             
             # State management (thread-safe)
             self.is_playing = False
@@ -68,21 +79,71 @@ class TTSHandler:
             self.cartesia_thread = None
             self.cartesia_future = None
             
-            # Initialize TTS engines
-            if self.use_cartesia:
-                self._init_cartesia()
-            else:
+            # Kokoro engine state
+            self.kokoro_engine = None
+            self.kokoro_loop = None
+            self.kokoro_thread = None
+            
+            # Active engine tracker
+            self.active_engine = "system"
+            
+            # Initialize TTS engines (priority: kokoro → cartesia → system)
+            initialized = False
+            
+            if self.use_kokoro and KOKORO_AVAILABLE:
+                try:
+                    self._init_kokoro()
+                    self.active_engine = "kokoro"
+                    initialized = True
+                except Exception as e:
+                    logger.warning(f"⚠️ Kokoro init failed, falling through: {e}")
+            
+            if not initialized and self.use_cartesia:
+                try:
+                    self._init_cartesia()
+                    self.active_engine = "cartesia"
+                    initialized = True
+                except Exception as e:
+                    logger.warning(f"⚠️ Cartesia init failed, falling through: {e}")
+            
+            if not initialized:
                 self._init_system_engine()
+                self.active_engine = "system"
                     
         except Exception as e:
             logger.error(f"❌ TTS initialization error: {e}")
-            # Fallback to SystemEngine
-            if self.use_cartesia:
-                logger.info("🔄 Falling back to SystemEngine")
-                self.use_cartesia = False
-                self._init_system_engine()
-            else:
-                raise
+            raise
+    
+    def _init_kokoro(self):
+        """Initialize Kokoro-82M local GPU TTS engine."""
+        self.kokoro_engine = KokoroTTSEngine(
+            voice_config=KokoroVoiceConfig(voice="af_heart", speed=1.0)
+        )
+        self.kokoro_engine.set_barge_in_callback(self._check_barge_in_status)
+        
+        self.kokoro_loop = asyncio.new_event_loop()
+        self.kokoro_thread = threading.Thread(
+            target=self._run_kokoro_loop,
+            daemon=True
+        )
+        self.kokoro_thread.start()
+        
+        # 60s timeout — first run downloads ~170 MB model
+        future = asyncio.run_coroutine_threadsafe(
+            self.kokoro_engine.initialize(),
+            self.kokoro_loop
+        )
+        future.result(timeout=60.0)
+        
+        self.engine = None
+        self.stream = None
+        self.cartesia_engine = None
+        logger.info("✅ TTS: Kokoro-82M local GPU (~100ms latency + barge-in)")
+    
+    def _run_kokoro_loop(self):
+        """Run async event loop for Kokoro in separate thread."""
+        asyncio.set_event_loop(self.kokoro_loop)
+        self.kokoro_loop.run_forever()
     
     def _init_cartesia(self):
         """Initialize Cartesia AI with optimal config."""
@@ -310,7 +371,9 @@ class TTSHandler:
                 self.main_stt.clear_realtime_text()
                 self.last_seen_realtime_text = ""
             
-            if self.use_cartesia and self.cartesia_engine:
+            if self.active_engine == "kokoro" and self.kokoro_engine:
+                return self._speak_async_engine(text, enable_barge_in, speed, engine=self.kokoro_engine, loop=self.kokoro_loop)
+            elif self.active_engine == "cartesia" and self.cartesia_engine:
                 return self._speak_cartesia(text, enable_barge_in, emotion, speed)
             else:
                 return self._speak_system_engine(text, voice, emotive_tags, enable_barge_in)
@@ -322,6 +385,63 @@ class TTSHandler:
                 logger.warning("🔄 Falling back to SystemEngine")
                 return self._speak_system_engine(text, voice, emotive_tags, enable_barge_in)
             return ""
+    
+    def _speak_async_engine(self, text: str, enable_barge_in: bool = True,
+                            speed: float = 1.0, engine=None, loop=None) -> str:
+        """Generic async-engine speak (used for Kokoro and other async engines)."""
+        try:
+            if not engine or not loop:
+                raise ValueError("Async engine or loop not provided")
+            
+            # Stop any ongoing playback
+            with self.state_lock:
+                was_playing = self.is_playing
+            
+            if was_playing:
+                logger.info("🛑 Stopping previous TTS before new speech")
+                try:
+                    asyncio.run_coroutine_threadsafe(
+                        engine.stop(), loop
+                    ).result(timeout=0.5)
+                except TimeoutError:
+                    logger.debug("Stop timeout (TTS may have already finished)")
+                except Exception as e:
+                    if str(e):
+                        logger.warning(f"Stop error: {e}")
+                time.sleep(0.1)
+            
+            logger.info(f"🗣 Kokoro: {text[:50]}... (barge-in: {enable_barge_in})")
+            
+            self.stop_event.clear()
+            
+            future = asyncio.run_coroutine_threadsafe(
+                engine.synthesize_and_play(
+                    text=text,
+                    enable_barge_in=enable_barge_in
+                ),
+                loop
+            )
+            
+            with self.state_lock:
+                self.is_playing = True
+                self.barge_in_detected = False
+            
+            def monitor_completion():
+                try:
+                    future.result(timeout=30.0)
+                except Exception as e:
+                    logger.debug(f"Playback monitoring: {e}")
+                finally:
+                    with self.state_lock:
+                        self.is_playing = False
+            
+            threading.Thread(target=monitor_completion, daemon=True).start()
+            
+            return "kokoro_streaming"
+            
+        except Exception as e:
+            logger.error(f"❌ Async engine error: {e}")
+            raise
     
     def _speak_cartesia(self, text: str, enable_barge_in: bool = True,
                        emotion: str = "neutral", speed: float = 1.0) -> str:
@@ -426,9 +546,9 @@ class TTSHandler:
         Returns True if completed, False if interrupted.
         """
         try:
-            # Cartesia: DON'T BLOCK - audio plays in background thread
+            # Async engines (Kokoro / Cartesia): DON'T BLOCK - audio plays in background
             # This allows STT to continue listening during TTS playback (full-duplex)
-            if self.use_cartesia and hasattr(self, 'cartesia_future') and self.cartesia_future:
+            if self.active_engine in ("kokoro", "cartesia"):
                 # Just return immediately - the audio consumer thread handles playback
                 # Barge-in detection happens via callback during playback
                 return True
@@ -466,7 +586,10 @@ class TTSHandler:
                 if not self.is_playing:
                     return  # Nothing playing - ignore spurious calls from STT callbacks
 
-            if self.use_cartesia and self.cartesia_engine:
+            if self.active_engine == "kokoro" and self.kokoro_engine:
+                self.kokoro_engine.stop_playback()
+                logger.info("🛑 Kokoro stopped")
+            elif self.active_engine == "cartesia" and self.cartesia_engine:
                 self.cartesia_engine.stop_playback()
                 logger.info("🛑 Cartesia stopped")
             elif self.stream:
@@ -488,6 +611,26 @@ class TTSHandler:
             with self.state_lock:
                 self.is_playing = False
             self.stop_event.set()
+            
+            # Shutdown Kokoro
+            if hasattr(self, 'kokoro_engine') and self.kokoro_engine:
+                try:
+                    asyncio.run_coroutine_threadsafe(
+                        self.kokoro_engine.cleanup(),
+                        self.kokoro_loop
+                    ).result(timeout=5.0)
+                except Exception as e:
+                    logger.warning(f"Kokoro cleanup error: {e}")
+                
+                if self.kokoro_loop:
+                    self.kokoro_loop.call_soon_threadsafe(self.kokoro_loop.stop)
+                    if self.kokoro_thread and self.kokoro_thread.is_alive():
+                        self.kokoro_thread.join(timeout=3.0)
+                    if not self.kokoro_loop.is_closed():
+                        self.kokoro_loop.close()
+                
+                self.kokoro_engine = None
+                logger.info("✅ Kokoro TTS shutdown complete")
             
             # Shutdown Cartesia
             if self.use_cartesia and hasattr(self, 'cartesia_engine') and self.cartesia_engine:
@@ -519,7 +662,7 @@ class TTSHandler:
                 logger.info("✅ Cartesia TTS shutdown complete")
             
             # Shutdown SystemEngine
-            if not self.use_cartesia:
+            if self.active_engine == "system":
                 if hasattr(self, 'stream') and self.stream:
                     try:
                         self.stream.stop()
