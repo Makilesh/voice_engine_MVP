@@ -153,7 +153,7 @@ class KokoroTTSEngine:
             playback_start = time.time()
 
             # Polling loop — check barge-in or natural finish via is_playing()
-            while self._stream.is_playing() and not self._stop_event.is_set():
+            while self._stream and self._stream.is_playing() and not self._stop_event.is_set():
                 elapsed = time.time() - playback_start
 
                 # Barge-in check (after startup buffer)

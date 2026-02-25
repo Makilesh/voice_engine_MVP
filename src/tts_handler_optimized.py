@@ -206,21 +206,27 @@ class TTSHandler:
         asyncio.set_event_loop(self.cartesia_loop)
         self.cartesia_loop.run_forever()
     
+    @staticmethod
+    def _strip_punct(text: str) -> set:
+        """Lowercase, strip punctuation, return word set."""
+        import re
+        return set(re.sub(r'[^\w\s]', '', text.lower()).split())
+
     def _is_echo(self, stt_text: str) -> bool:
         """
         Detect if STT text is an echo of the current TTS output.
-        Uses word-overlap ratio — if ≥50% of STT words appear in TTS text, it's echo.
+        Uses word-overlap ratio — if ≥30% of STT words appear in TTS text, it's echo.
         """
         if not self._current_tts_text or not stt_text:
             return False
-        stt_words = set(stt_text.lower().split())
-        tts_words = set(self._current_tts_text.lower().split())
+        stt_words = self._strip_punct(stt_text)
+        tts_words = self._strip_punct(self._current_tts_text)
         if not stt_words:
             return False
         overlap = len(stt_words & tts_words)
         ratio = overlap / len(stt_words)
-        if ratio >= 0.5:
-            logger.debug(f"🔇 Echo suppressed ({ratio:.0%} overlap): {stt_text[:30]}")
+        if ratio >= 0.3:
+            logger.debug(f"🔇 Echo suppressed ({ratio:.0%} overlap): {stt_text[:40]}")
             return True
         return False
 
@@ -452,6 +458,13 @@ class TTSHandler:
             self.stop_event.clear()
             self._playback_start_time = time.time()   # Start grace period clock
             
+            # Disable STT→stop_playback path during async engine playback
+            # (the engine's own barge_in_callback handles barge-in with echo protection)
+            self._saved_stt_stop_cb = None
+            if self.main_stt and hasattr(self.main_stt, 'tts_stop_callback'):
+                self._saved_stt_stop_cb = self.main_stt.tts_stop_callback
+                self.main_stt.tts_stop_callback = None
+            
             future = asyncio.run_coroutine_threadsafe(
                 engine.synthesize_and_play(
                     text=text,
@@ -472,6 +485,9 @@ class TTSHandler:
                 finally:
                     with self.state_lock:
                         self.is_playing = False
+                    # Restore STT stop callback when playback ends
+                    if self.main_stt and hasattr(self.main_stt, 'tts_stop_callback'):
+                        self.main_stt.tts_stop_callback = self._saved_stt_stop_cb
             
             threading.Thread(target=monitor_completion, daemon=True).start()
             
@@ -620,7 +636,7 @@ class TTSHandler:
     
     def stop_playback(self):
         """Immediately stop TTS playback. No-op if nothing is playing.
-        Respects echo grace period to avoid speaker→mic feedback."""
+        Respects echo grace period + echo detection to avoid speaker→mic feedback."""
         try:
             with self.state_lock:
                 if not self.is_playing:
@@ -631,6 +647,12 @@ class TTSHandler:
             if elapsed < self._barge_in_grace_period:
                 logger.debug(f"🔇 stop_playback ignored (echo grace {elapsed:.2f}s < {self._barge_in_grace_period}s)")
                 return
+            
+            # Echo detection — compare current STT text to TTS text
+            if self.main_stt:
+                stt_text = self.main_stt.get_realtime_text()
+                if self._is_echo(stt_text):
+                    return
 
             if self.active_engine == "kokoro" and self.kokoro_engine:
                 self.kokoro_engine.stop_playback()
