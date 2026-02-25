@@ -74,6 +74,11 @@ class TTSHandler:
             self.barge_in_error_count = 0
             self.max_barge_in_errors = 3
             
+            # Echo / feedback protection
+            self._current_tts_text = ""          # Text being spoken (for echo detection)
+            self._playback_start_time = 0.0       # Timestamp when TTS started playing
+            self._barge_in_grace_period = 1.5     # Seconds to ignore barge-in after TTS starts
+            
             # Async event loop for Cartesia (if needed)
             self.cartesia_loop = None
             self.cartesia_thread = None
@@ -117,7 +122,8 @@ class TTSHandler:
     def _init_kokoro(self):
         """Initialize Kokoro-82M local GPU TTS engine."""
         self.kokoro_engine = KokoroTTSEngine(
-            voice_config=KokoroVoiceConfig(voice="af_heart", speed=1.0)
+            voice_config=KokoroVoiceConfig(voice="af_heart", speed=1.0),
+            barge_in_startup_buffer=1.5   # 1.5s grace to avoid speaker→mic echo
         )
         self.kokoro_engine.set_barge_in_callback(self._check_barge_in_status)
         
@@ -200,13 +206,38 @@ class TTSHandler:
         asyncio.set_event_loop(self.cartesia_loop)
         self.cartesia_loop.run_forever()
     
+    def _is_echo(self, stt_text: str) -> bool:
+        """
+        Detect if STT text is an echo of the current TTS output.
+        Uses word-overlap ratio — if ≥50% of STT words appear in TTS text, it's echo.
+        """
+        if not self._current_tts_text or not stt_text:
+            return False
+        stt_words = set(stt_text.lower().split())
+        tts_words = set(self._current_tts_text.lower().split())
+        if not stt_words:
+            return False
+        overlap = len(stt_words & tts_words)
+        ratio = overlap / len(stt_words)
+        if ratio >= 0.5:
+            logger.debug(f"🔇 Echo suppressed ({ratio:.0%} overlap): {stt_text[:30]}")
+            return True
+        return False
+
     def _check_barge_in_status(self) -> bool:
         """
-        Callback for Cartesia to check if user is speaking.
+        Callback for Cartesia/Kokoro to check if user is speaking.
         Returns True if barge-in detected.
+        Protects against audio echo by enforcing grace period + echo detection.
         """
         try:
             if not self.is_barge_in_enabled or not self.main_stt:
+                return False
+            
+            # Grace period — ignore barge-in while TTS audio is still
+            # resonating through the speakers into the mic
+            elapsed = time.time() - self._playback_start_time
+            if elapsed < self._barge_in_grace_period:
                 return False
             
             # Get real-time STT text
@@ -216,6 +247,10 @@ class TTSHandler:
             with self.state_lock:
                 if realtime_text and len(realtime_text) >= self.barge_in_sensitivity:
                     if realtime_text != self.last_seen_realtime_text:
+                        # Echo detection — skip if STT is just repeating TTS output
+                        if self._is_echo(realtime_text):
+                            self.last_seen_realtime_text = realtime_text
+                            return False
                         logger.info(f"🎤 Barge-in detected: {realtime_text[:30]}...")
                         self.barge_in_detected = True
                         self.last_seen_realtime_text = realtime_text
@@ -321,6 +356,7 @@ class TTSHandler:
                 with self.state_lock:
                     self.is_playing = True
                 self.stop_event.clear()
+                self._playback_start_time = time.time()
                 
                 # Start barge-in monitor
                 monitor_thread = threading.Thread(
@@ -366,7 +402,8 @@ class TTSHandler:
             
             self.is_barge_in_enabled = enable_barge_in
             
-            # Clear STT buffer before speaking
+            # Clear STT buffer before speaking and store TTS text for echo detection
+            self._current_tts_text = text
             if self.main_stt:
                 self.main_stt.clear_realtime_text()
                 self.last_seen_realtime_text = ""
@@ -413,6 +450,7 @@ class TTSHandler:
             logger.info(f"🗣 Kokoro: {text[:50]}... (barge-in: {enable_barge_in})")
             
             self.stop_event.clear()
+            self._playback_start_time = time.time()   # Start grace period clock
             
             future = asyncio.run_coroutine_threadsafe(
                 engine.synthesize_and_play(
@@ -474,6 +512,7 @@ class TTSHandler:
             
             # Clear stop event from any previous call
             self.stop_event.clear()
+            self._playback_start_time = time.time()   # Start grace period clock
 
             # Update voice config if needed
             if speed != 1.0:
@@ -580,11 +619,18 @@ class TTSHandler:
             return self.barge_in_detected
     
     def stop_playback(self):
-        """Immediately stop TTS playback. No-op if nothing is playing."""
+        """Immediately stop TTS playback. No-op if nothing is playing.
+        Respects echo grace period to avoid speaker→mic feedback."""
         try:
             with self.state_lock:
                 if not self.is_playing:
                     return  # Nothing playing - ignore spurious calls from STT callbacks
+            
+            # Grace period — don't allow STT echo to kill TTS prematurely
+            elapsed = time.time() - self._playback_start_time
+            if elapsed < self._barge_in_grace_period:
+                logger.debug(f"🔇 stop_playback ignored (echo grace {elapsed:.2f}s < {self._barge_in_grace_period}s)")
+                return
 
             if self.active_engine == "kokoro" and self.kokoro_engine:
                 self.kokoro_engine.stop_playback()
