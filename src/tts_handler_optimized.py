@@ -77,7 +77,7 @@ class TTSHandler:
             # Echo / feedback protection
             self._current_tts_text = ""          # Text being spoken (for echo detection)
             self._playback_start_time = 0.0       # Timestamp when TTS started playing
-            self._barge_in_grace_period = 1.5     # Seconds to ignore barge-in after TTS starts
+            self._barge_in_grace_period = 2.0     # Will be set dynamically per utterance
             
             # Async event loop for Cartesia (if needed)
             self.cartesia_loop = None
@@ -123,7 +123,7 @@ class TTSHandler:
         """Initialize Kokoro-82M local GPU TTS engine."""
         self.kokoro_engine = KokoroTTSEngine(
             voice_config=KokoroVoiceConfig(voice="af_heart", speed=1.0),
-            barge_in_startup_buffer=1.5   # 1.5s grace to avoid speaker→mic echo
+            barge_in_startup_buffer=2.0   # Minimum grace; handler sets dynamic grace per-utterance
         )
         self.kokoro_engine.set_barge_in_callback(self._check_barge_in_status)
         
@@ -410,6 +410,9 @@ class TTSHandler:
             
             # Clear STT buffer before speaking and store TTS text for echo detection
             self._current_tts_text = text
+            # Dynamic grace period: ~0.04s per char, clamp [2s, 8s]
+            # Longer text = longer speaker audio = longer echo exposure
+            self._barge_in_grace_period = min(max(len(text) * 0.04, 2.0), 8.0)
             if self.main_stt:
                 self.main_stt.clear_realtime_text()
                 self.last_seen_realtime_text = ""
@@ -530,6 +533,12 @@ class TTSHandler:
             self.stop_event.clear()
             self._playback_start_time = time.time()   # Start grace period clock
 
+            # Disable STT→stop_playback path during async playback
+            self._saved_stt_stop_cb = None
+            if self.main_stt and hasattr(self.main_stt, 'tts_stop_callback'):
+                self._saved_stt_stop_cb = self.main_stt.tts_stop_callback
+                self.main_stt.tts_stop_callback = None
+
             # Update voice config if needed
             if speed != 1.0:
                 self.cartesia_engine.voice_config.speed = speed
@@ -559,6 +568,9 @@ class TTSHandler:
                     with self.state_lock:
                         self.is_playing = False
                         self.cartesia_future = None
+                    # Restore STT stop callback
+                    if self.main_stt and hasattr(self.main_stt, 'tts_stop_callback'):
+                        self.main_stt.tts_stop_callback = self._saved_stt_stop_cb
             
             threading.Thread(target=monitor_completion, daemon=True).start()
             
