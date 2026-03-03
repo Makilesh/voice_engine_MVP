@@ -120,12 +120,14 @@ class TTSHandler:
             raise
     
     def _init_kokoro(self):
-        """Initialize Kokoro-82M local GPU TTS engine."""
+        """Initialize Kokoro-82M local GPU TTS engine.
+        NOTE: Barge-in is disabled for local TTS — speaker audio feeds back into mic
+        without hardware AEC. Half-duplex mode (speak → wait → listen) is used instead."""
         self.kokoro_engine = KokoroTTSEngine(
             voice_config=KokoroVoiceConfig(voice="af_heart", speed=1.0),
-            barge_in_startup_buffer=2.0   # Minimum grace; handler sets dynamic grace per-utterance
+            barge_in_startup_buffer=999.0   # Effectively disable engine-side barge-in polling
         )
-        self.kokoro_engine.set_barge_in_callback(self._check_barge_in_status)
+        # No barge-in callback for Kokoro — half-duplex mode
         
         self.kokoro_loop = asyncio.new_event_loop()
         self.kokoro_thread = threading.Thread(
@@ -408,14 +410,19 @@ class TTSHandler:
             
             self.is_barge_in_enabled = enable_barge_in
             
-            # Clear STT buffer before speaking and store TTS text for echo detection
+            # For Kokoro (local TTS): force barge-in OFF — speaker→mic echo
+            # makes real-time barge-in impossible without hardware AEC.
+            if self.active_engine == "kokoro":
+                self.is_barge_in_enabled = False
+                enable_barge_in = False
+            
+            # Clear STT buffer before speaking
             self._current_tts_text = text
-            # Dynamic grace period: ~0.04s per char, clamp [2s, 8s]
-            # Longer text = longer speaker audio = longer echo exposure
-            self._barge_in_grace_period = min(max(len(text) * 0.04, 2.0), 8.0)
             if self.main_stt:
                 self.main_stt.clear_realtime_text()
                 self.last_seen_realtime_text = ""
+                # Suppress STT while TTS is playing (speaker→mic echo)
+                self.main_stt.tts_is_active = True
             
             if self.active_engine == "kokoro" and self.kokoro_engine:
                 return self._speak_async_engine(text, enable_barge_in, speed, engine=self.kokoro_engine, loop=self.kokoro_loop)
@@ -491,6 +498,12 @@ class TTSHandler:
                     # Restore STT stop callback when playback ends
                     if self.main_stt and hasattr(self.main_stt, 'tts_stop_callback'):
                         self.main_stt.tts_stop_callback = self._saved_stt_stop_cb
+                    # Resume STT after echo settles
+                    if self.main_stt and hasattr(self.main_stt, 'tts_is_active'):
+                        time.sleep(0.5)  # Let speaker echo decay
+                        self.main_stt.tts_is_active = False
+                        self.main_stt.clear_realtime_text()
+                        logger.debug("🎤 STT resumed after TTS playback")
             
             threading.Thread(target=monitor_completion, daemon=True).start()
             
@@ -571,6 +584,12 @@ class TTSHandler:
                     # Restore STT stop callback
                     if self.main_stt and hasattr(self.main_stt, 'tts_stop_callback'):
                         self.main_stt.tts_stop_callback = self._saved_stt_stop_cb
+                    # Resume STT after echo settles
+                    if self.main_stt and hasattr(self.main_stt, 'tts_is_active'):
+                        time.sleep(0.5)
+                        self.main_stt.tts_is_active = False
+                        self.main_stt.clear_realtime_text()
+                        logger.debug("🎤 STT resumed after TTS playback")
             
             threading.Thread(target=monitor_completion, daemon=True).start()
             
@@ -608,14 +627,36 @@ class TTSHandler:
     def wait_for_completion(self, timeout: float = 30.0) -> bool:
         """
         Wait for playback to complete or be interrupted.
+        For Kokoro: BLOCKS until done (half-duplex — local TTS has no AEC for barge-in).
         For Cartesia: Returns immediately to maintain full-duplex (audio plays in background).
         For SystemEngine: Polls until completion.
         Returns True if completed, False if interrupted.
         """
         try:
-            # Async engines (Kokoro / Cartesia): DON'T BLOCK - audio plays in background
+            # Kokoro (local TTS): BLOCK until playback finishes.
+            # Local speaker audio feeds back into mic → Whisper hallucinates → false barge-in.
+            # Without hardware AEC, half-duplex is the only reliable approach.
+            if self.active_engine == "kokoro":
+                start_time = time.time()
+                while True:
+                    with self.state_lock:
+                        if not self.is_playing:
+                            break
+                        if self.barge_in_detected:
+                            return False
+                    if time.time() - start_time > timeout:
+                        logger.warning("⏰ Kokoro playback timeout")
+                        return False
+                    time.sleep(0.05)  # 50ms polling
+                # Post-TTS cooldown: let speaker echo decay before STT resumes
+                time.sleep(0.6)
+                if self.main_stt:
+                    self.main_stt.flush_recorder()  # Discard echo audio captured during playback
+                return not self.barge_in_detected
+
+            # Cartesia (cloud TTS): DON'T BLOCK - audio plays in background
             # This allows STT to continue listening during TTS playback (full-duplex)
-            if self.active_engine in ("kokoro", "cartesia"):
+            if self.active_engine == "cartesia":
                 # Just return immediately - the audio consumer thread handles playback
                 # Barge-in detection happens via callback during playback
                 return True
@@ -648,28 +689,27 @@ class TTSHandler:
     
     def stop_playback(self):
         """Immediately stop TTS playback. No-op if nothing is playing.
-        Respects echo grace period + echo detection to avoid speaker→mic feedback."""
+        For Kokoro: barge-in is disabled (half-duplex), so this is only called on shutdown.
+        For Cartesia/System: respects echo grace period."""
         try:
             with self.state_lock:
                 if not self.is_playing:
                     return  # Nothing playing - ignore spurious calls from STT callbacks
             
-            # Grace period — don't allow STT echo to kill TTS prematurely
-            elapsed = time.time() - self._playback_start_time
-            if elapsed < self._barge_in_grace_period:
-                logger.debug(f"🔇 stop_playback ignored (echo grace {elapsed:.2f}s < {self._barge_in_grace_period}s)")
-                return
-            
-            # Echo detection — compare current STT text to TTS text
-            if self.main_stt:
-                stt_text = self.main_stt.get_realtime_text()
-                if self._is_echo(stt_text):
-                    return
-
+            # Kokoro: barge-in disabled, but allow explicit stop (e.g., shutdown)
             if self.active_engine == "kokoro" and self.kokoro_engine:
                 self.kokoro_engine.stop_playback()
                 logger.info("🛑 Kokoro stopped")
             elif self.active_engine == "cartesia" and self.cartesia_engine:
+                # Grace period for Cartesia (cloud TTS barge-in IS supported)
+                elapsed = time.time() - self._playback_start_time
+                if elapsed < self._barge_in_grace_period:
+                    logger.debug(f"🔇 stop_playback ignored (echo grace {elapsed:.2f}s)")
+                    return
+                if self.main_stt:
+                    stt_text = self.main_stt.get_realtime_text()
+                    if self._is_echo(stt_text):
+                        return
                 self.cartesia_engine.stop_playback()
                 logger.info("🛑 Cartesia stopped")
             elif self.stream:
@@ -691,6 +731,10 @@ class TTSHandler:
             with self.state_lock:
                 self.is_playing = False
             self.stop_event.set()
+            
+            # Always re-enable STT on shutdown
+            if self.main_stt and hasattr(self.main_stt, 'tts_is_active'):
+                self.main_stt.tts_is_active = False
             
             # Shutdown Kokoro
             if hasattr(self, 'kokoro_engine') and self.kokoro_engine:

@@ -45,6 +45,10 @@ class STTHandler:
         # FIX: Link STT voice detection to TTS stop for partial barge-in (e.g., "could you..." from logs)
         self.tts_stop_callback = None
         
+        # Echo suppression: discard realtime updates while TTS is active
+        # (speaker audio feeds back into mic → Whisper hallucinates garbage)
+        self.tts_is_active = False
+        
         # CRITICAL: Completed transcription queue (non-blocking)
         self.completed_transcriptions = asyncio.Queue()
         self.last_completed_text = ""
@@ -75,6 +79,10 @@ class STTHandler:
     
     def _on_realtime_update(self, text: str):
         """CRITICAL: Called continuously during speech (non-blocking)."""
+        # Suppress echo: while TTS is playing, the mic picks up speaker audio
+        # and Whisper hallucinates garbage text. Discard it.
+        if self.tts_is_active:
+            return
         with self.realtime_lock:
             self.realtime_text = text
     
@@ -95,9 +103,12 @@ class STTHandler:
                 def on_realtime_update(text: str):
                     handler_self._on_realtime_update(text)
                     
-                    # Only trigger barge-in stop when user is actually saying something
-                    # (not on noise or single-char spurious detections)
-                    if handler_self.tts_stop_callback and text and len(text.strip()) >= 4:
+                    # Only trigger barge-in stop when:
+                    # 1. TTS is NOT active (would be echo, not real user speech)
+                    # 2. User is actually saying something (not noise)
+                    if (not handler_self.tts_is_active
+                            and handler_self.tts_stop_callback
+                            and text and len(text.strip()) >= 4):
                         handler_self.tts_stop_callback()
                 
                 def on_transcription_complete(text: str):
@@ -182,6 +193,17 @@ class STTHandler:
         """Clear real-time buffer."""
         with self.realtime_lock:
             self.realtime_text = ""
+    
+    def flush_recorder(self):
+        """Discard any pending audio captured during TTS playback (echo).
+        Call after TTS completes to ensure the next get_transcription() starts fresh."""
+        if self.recorder:
+            try:
+                self.recorder.abort()
+                self.recorder.clear_audio_queue()
+            except Exception as e:
+                logger.debug(f"Recorder flush: {e}")
+        self.clear_realtime_text()
     
     async def get_transcription(self) -> str:
         """
