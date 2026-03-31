@@ -1,7 +1,8 @@
 # Voice Processing Dependencies
 # realtimetts[orpheus]
-
+RealtimeTTS[kokoro]
 RealtimeSTT
+RealtimeTTS
 faster-whisper
 requests
 python-dotenv

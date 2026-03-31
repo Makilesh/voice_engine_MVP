@@ -131,7 +131,7 @@ class STTHandler:
                         # CRITICAL: Enable real-time callbacks
                         enable_realtime_transcription=True,
                         on_realtime_transcription_update=on_realtime_update,
-                        on_transcription_complete=on_transcription_complete,  # Fallback capture path
+                        # NOTE: on_transcription_complete not supported by installed RealtimeSTT version
                         realtime_model_type="tiny.en",  # Tiny for real-time preview, main model for final
                         
                         # PRODUCTION OPTIMIZED - Relaxed for post-TTS recovery

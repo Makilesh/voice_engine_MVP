@@ -20,7 +20,7 @@ except ImportError:
     REALTIMETTS_AVAILABLE = False
     SystemEngine = None
     TextToAudioStream = None
-    logging.warning("⚠️ RealtimeTTS not available - SystemEngine fallback disabled")
+    logging.debug("RealtimeTTS not available - SystemEngine fallback disabled (expected when using Kokoro)")
 
 from cartesia_tts_engine_optimized import CartesiaTTSEngine, VoiceConfig, AudioConfig, CartesiaVoices
 
