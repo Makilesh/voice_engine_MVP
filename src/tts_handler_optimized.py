@@ -702,11 +702,13 @@ class TTSHandler:
 
                     time.sleep(0.05)  # 50ms polling
 
-                # Post-TTS cooldown: let speaker echo decay, then flush captured audio
-                time.sleep(0.6)
+                # Post-TTS cooldown: brief pause for audio hardware to stop
+                # NOTE: Keep this short — user may already be speaking
+                time.sleep(0.1)
                 if self.main_stt:
                     self.main_stt.tts_is_active = False
                     self.main_stt.flush_recorder()
+                logger.info(f"🔊 Kokoro playback ended, STT re-enabled (took {time.time() - start_time:.2f}s)")
                 return not self.barge_in_detected
 
             # Cartesia (cloud TTS): Block until playback finishes for proper sequencing.

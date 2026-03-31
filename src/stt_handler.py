@@ -89,7 +89,11 @@ class STTHandler:
         # Suppress echo: while TTS is playing, the mic picks up speaker audio
         # and Whisper hallucinates garbage text. Discard it.
         if self.tts_is_active:
+            logger.debug(f"🔇 Suppressing echo during TTS: '{text[:30] if text else ''}...'")
             return
+        # Log that we're receiving speech - proves VAD is working
+        if text and text.strip():
+            logger.info(f"🎙️ Heard: '{text}'")
         with self.realtime_lock:
             self.realtime_text = text
     
@@ -134,17 +138,17 @@ class STTHandler:
                         # NOTE: on_transcription_complete not supported by installed RealtimeSTT version
                         realtime_model_type="tiny.en",  # Tiny for real-time preview, main model for final
                         
-                        # PRODUCTION OPTIMIZED - Relaxed for post-TTS recovery
+                        # PRODUCTION OPTIMIZED - Sensitive for reliable speech detection
                         realtime_processing_pause=0.1,
-                        post_speech_silence_duration=0.3,  # Reduced from 0.4 for faster response
-                        min_length_of_recording=0.3,       # Reduced from 0.5 to catch short utterances
-                        min_gap_between_recordings=0.2,
-                        pre_recording_buffer_duration=0.2,
+                        post_speech_silence_duration=0.25,  # Reduced for faster response
+                        min_length_of_recording=0.2,        # Catch even short utterances
+                        min_gap_between_recordings=0.15,
+                        pre_recording_buffer_duration=0.3,  # Capture speech start reliably
                         
-                        # VAD settings - balanced for real-world use
-                        silero_sensitivity=0.38,
+                        # VAD settings - MORE SENSITIVE to catch speech after TTS
+                        silero_sensitivity=0.45,   # Increased from 0.38 (higher = more sensitive)
                         silero_use_onnx=True,
-                        webrtc_sensitivity=2,
+                        webrtc_sensitivity=3,      # Increased from 2 (higher = more sensitive)
                         
                         beam_size=1,  # Fastest: near-realtime (was 3)
                         initial_prompt="Shamla Tech AI services, blockchain, cryptocurrency, DeFi, API, machine learning, automation",
@@ -202,20 +206,12 @@ class STTHandler:
             self.realtime_text = ""
     
     def flush_recorder(self):
-        """Discard any pending audio captured during TTS playback (echo).
-        Call after TTS completes to ensure the next get_transcription() starts fresh.
-        NOTE: We do NOT call recorder.abort() here — it corrupts VAD state on Windows
-        and causes recorder.text() to hang forever. Only clear the audio queue."""
-        # Brief pause to let any in-flight audio chunks drain through the pipe
-        import time
-        time.sleep(0.3)
-        if self.recorder:
-            try:
-                # Only clear the audio queue — do NOT call abort() as it breaks VAD state
-                self.recorder.clear_audio_queue()
-            except Exception as e:
-                logger.debug(f"Recorder flush: {e}")
+        """Reset STT state after TTS playback.
+        NOTE: We do NOT call clear_audio_queue() — it corrupts VAD state on Windows
+        and causes recorder.text() to hang. Let VAD naturally handle the transition.
+        The tts_is_active flag already prevents echo from being transcribed."""
         self.clear_realtime_text()
+        logger.debug("🔄 STT buffer cleared, ready for new speech")
 
     def get_audio_rms(self) -> float:
         """Compute RMS amplitude of the current mic audio buffer.
@@ -283,11 +279,21 @@ class STTHandler:
             
             # CRITICAL: Force-reset tts_is_active at the start of every transcription
             # to prevent stuck flag from exceptions in TTS wait_for_completion()
+            if self.tts_is_active:
+                logger.warning("⚠️ tts_is_active was True at transcription start - forcing reset")
             self.tts_is_active = False
             
             # Clear previous state and any stale echo text
             self.last_completed_text = ""
             self.clear_realtime_text()
+            
+            # CRITICAL: Force recorder into "listening" state to ensure VAD is active
+            # This is essential after TTS playback — the recorder may be in a stale state
+            try:
+                self.recorder.listen()
+                logger.info("🎧 STT: Recorder in listening state, VAD active")
+            except Exception as e:
+                logger.debug(f"recorder.listen() call: {e}")
             
             # CRITICAL: Run blocking .text() in thread pool with timeout
             loop = asyncio.get_event_loop()
