@@ -186,11 +186,41 @@ class KokoroTTSEngine:
     # ------------------------------------------------------------------
 
     def stop_playback(self):
-        """Immediately stop playback."""
+        """Immediately stop playback - forcefully close audio stream."""
+        logger.info("🔇 stop_playback called - stopping Kokoro TTS")
         self._stop_event.set()
         try:
             if self._stream:
+                # Standard stop - this sets immediate_stop flag
                 self._stream.stop()
+                logger.debug("🔇 stream.stop() called")
+                
+                # AGGRESSIVE: Force-close the underlying PyAudio stream to clear buffer
+                # This ensures no lingering audio plays after barge-in
+                try:
+                    if hasattr(self._stream, 'player') and self._stream.player:
+                        player = self._stream.player
+                        # Clear the audio buffer to prevent queued audio from playing
+                        if hasattr(player, 'buffer_manager') and player.buffer_manager:
+                            player.buffer_manager.clear_buffer()
+                            logger.debug("🔇 Audio buffer cleared")
+                        # Force close the PyAudio stream
+                        if hasattr(player, 'audio_stream') and player.audio_stream:
+                            audio_stream = player.audio_stream
+                            if hasattr(audio_stream, 'stream') and audio_stream.stream:
+                                try:
+                                    audio_stream.stream.stop_stream()
+                                except Exception:
+                                    pass
+                                try:
+                                    audio_stream.stream.close()
+                                except Exception:
+                                    pass
+                                audio_stream.stream = None
+                                logger.info("🔇 PyAudio stream force-closed")
+                except Exception as e:
+                    logger.debug(f"Force-close attempt: {e}")
+                    
         except (RuntimeError, AttributeError, OSError) as e:
             logger.debug(f"Stream stop error (non-critical): {e}")
         with self._state_lock:
