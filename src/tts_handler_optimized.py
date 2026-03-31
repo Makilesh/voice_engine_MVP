@@ -121,13 +121,12 @@ class TTSHandler:
     
     def _init_kokoro(self):
         """Initialize Kokoro-82M local GPU TTS engine.
-        NOTE: Barge-in is disabled for local TTS — speaker audio feeds back into mic
-        without hardware AEC. Half-duplex mode (speak → wait → listen) is used instead."""
+        Barge-in uses RMS energy monitoring (not Whisper) to avoid speaker→mic echo."""
         self.kokoro_engine = KokoroTTSEngine(
             voice_config=KokoroVoiceConfig(voice="af_heart", speed=1.0),
-            barge_in_startup_buffer=999.0   # Effectively disable engine-side barge-in polling
+            barge_in_startup_buffer=999.0   # Disable engine-side Whisper polling; handler uses RMS instead
         )
-        # No barge-in callback for Kokoro — half-duplex mode
+        # No engine-level barge_in_callback — handler-side RMS detection is used
         
         self.kokoro_loop = asyncio.new_event_loop()
         self.kokoro_thread = threading.Thread(
@@ -410,11 +409,9 @@ class TTSHandler:
             
             self.is_barge_in_enabled = enable_barge_in
             
-            # For Kokoro (local TTS): force barge-in OFF — speaker→mic echo
-            # makes real-time barge-in impossible without hardware AEC.
-            if self.active_engine == "kokoro":
-                self.is_barge_in_enabled = False
-                enable_barge_in = False
+            # For Kokoro (local TTS): barge-in uses RMS energy instead of Whisper.
+            # The engine-side barge_in_callback is disabled; detection happens in
+            # wait_for_completion() via mic audio RMS monitoring.
             
             # Clear STT buffer before speaking
             self._current_tts_text = text
@@ -498,12 +495,15 @@ class TTSHandler:
                     # Restore STT stop callback when playback ends
                     if self.main_stt and hasattr(self.main_stt, 'tts_stop_callback'):
                         self.main_stt.tts_stop_callback = self._saved_stt_stop_cb
-                    # Resume STT after echo settles
-                    if self.main_stt and hasattr(self.main_stt, 'tts_is_active'):
-                        time.sleep(0.5)  # Let speaker echo decay
-                        self.main_stt.tts_is_active = False
-                        self.main_stt.clear_realtime_text()
-                        logger.debug("🎤 STT resumed after TTS playback")
+                    # NOTE: For Kokoro, STT resume (tts_is_active=False) is handled
+                    # by wait_for_completion() which blocks and flushes after cooldown.
+                    # For other async engines using this method, resume here.
+                    if engine != self.kokoro_engine:
+                        if self.main_stt and hasattr(self.main_stt, 'tts_is_active'):
+                            time.sleep(0.5)
+                            self.main_stt.tts_is_active = False
+                            self.main_stt.clear_realtime_text()
+                            logger.debug("🎤 STT resumed after TTS playback")
             
             threading.Thread(target=monitor_completion, daemon=True).start()
             
@@ -633,25 +633,75 @@ class TTSHandler:
         Returns True if completed, False if interrupted.
         """
         try:
-            # Kokoro (local TTS): BLOCK until playback finishes.
-            # Local speaker audio feeds back into mic → Whisper hallucinates → false barge-in.
-            # Without hardware AEC, half-duplex is the only reliable approach.
+            # Kokoro (local TTS): BLOCK until playback finishes or RMS barge-in.
+            # Speaker audio feeds back into mic, so Whisper can't be used for detection.
+            # Instead, we monitor raw mic RMS energy — user's direct speech is much louder
+            # than the attenuated echo from speakers.
             if self.active_engine == "kokoro":
                 start_time = time.time()
+                echo_rms_samples = []
+                echo_baseline = 0.0
+                calibrated = False
+                consecutive_loud = 0
+                CALIBRATION_SECS = 1.5     # Measure echo baseline during this window
+                BARGE_IN_GRACE = 2.0       # Don't allow barge-in before this
+                RMS_MULTIPLIER = 2.5       # User must be 2.5× louder than echo
+                LOUD_FRAMES_NEEDED = 6     # ~0.3s sustained at 50ms polling
+
                 while True:
                     with self.state_lock:
                         if not self.is_playing:
                             break
                         if self.barge_in_detected:
-                            return False
+                            break
                     if time.time() - start_time > timeout:
                         logger.warning("⏰ Kokoro playback timeout")
-                        return False
+                        break
+
+                    elapsed = time.time() - start_time
+
+                    # Sample mic energy
+                    if self.main_stt:
+                        rms = self.main_stt.get_audio_rms()
+
+                        # Phase 1: calibrate echo baseline
+                        if not calibrated and elapsed < CALIBRATION_SECS:
+                            if rms > 0:
+                                echo_rms_samples.append(rms)
+                        elif not calibrated:
+                            if echo_rms_samples:
+                                echo_rms_samples.sort()
+                                idx = int(len(echo_rms_samples) * 0.75)
+                                echo_baseline = max(echo_rms_samples[idx], 200.0)
+                            else:
+                                echo_baseline = 500.0
+                            calibrated = True
+                            logger.debug(f"🔊 Echo RMS baseline: {echo_baseline:.0f}")
+
+                        # Phase 2: barge-in detection
+                        if calibrated and elapsed >= BARGE_IN_GRACE and self.is_barge_in_enabled:
+                            if rms > echo_baseline * RMS_MULTIPLIER:
+                                consecutive_loud += 1
+                                if consecutive_loud >= LOUD_FRAMES_NEEDED:
+                                    logger.info(f"🎤 Barge-in (RMS {rms:.0f} >> baseline {echo_baseline:.0f})")
+                                    try:
+                                        self.kokoro_engine.stop_playback()
+                                    except Exception:
+                                        pass
+                                    with self.state_lock:
+                                        self.is_playing = False
+                                        self.barge_in_detected = True
+                                    break
+                            else:
+                                consecutive_loud = max(0, consecutive_loud - 1)
+
                     time.sleep(0.05)  # 50ms polling
-                # Post-TTS cooldown: let speaker echo decay before STT resumes
+
+                # Post-TTS cooldown: let speaker echo decay, then flush captured audio
                 time.sleep(0.6)
                 if self.main_stt:
-                    self.main_stt.flush_recorder()  # Discard echo audio captured during playback
+                    self.main_stt.tts_is_active = False
+                    self.main_stt.flush_recorder()
                 return not self.barge_in_detected
 
             # Cartesia (cloud TTS): DON'T BLOCK - audio plays in background

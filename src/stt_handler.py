@@ -6,6 +6,7 @@ import warnings
 import concurrent.futures
 import re
 import threading
+import numpy as np
 from RealtimeSTT import AudioToTextRecorder
 
 # Configure logging
@@ -204,6 +205,24 @@ class STTHandler:
             except Exception as e:
                 logger.debug(f"Recorder flush: {e}")
         self.clear_realtime_text()
+
+    def get_audio_rms(self) -> float:
+        """Compute RMS amplitude of the current mic audio buffer.
+        Uses the recorder's internal audio_buffer (always populated, even when not recording).
+        Returns 0.0 on error or if no data."""
+        if not self.recorder or not hasattr(self.recorder, 'audio_buffer'):
+            return 0.0
+        try:
+            chunks = list(self.recorder.audio_buffer)  # thread-safe deque snapshot
+            if not chunks:
+                return 0.0
+            data = b''.join(chunks)
+            audio = np.frombuffer(data, dtype=np.int16)
+            if len(audio) == 0:
+                return 0.0
+            return float(np.sqrt(np.mean(audio.astype(np.float64) ** 2)))
+        except Exception:
+            return 0.0
     
     async def get_transcription(self) -> str:
         """
