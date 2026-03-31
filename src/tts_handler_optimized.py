@@ -647,11 +647,13 @@ class TTSHandler:
                 echo_baseline = 0.0
                 calibrated = False
                 consecutive_loud = 0
-                CALIBRATION_SECS = 1.5     # Measure echo baseline during this window
-                BARGE_IN_GRACE = 2.0       # Don't allow barge-in before this
-                RMS_MULTIPLIER = 2.5       # User must be 2.5× louder than echo
-                LOUD_FRAMES_NEEDED = 6     # ~0.3s sustained at 50ms polling
+                CALIBRATION_SECS = 1.0     # Measure echo baseline during this window
+                BARGE_IN_GRACE = 1.5       # Don't allow barge-in before this
+                RMS_MULTIPLIER = 1.5       # Reduced from 2.0 - user must be 1.5× louder than echo
+                LOUD_FRAMES_NEEDED = 4     # ~0.2s sustained at 50ms polling
                 RMS_NOISE_FLOOR = 100      # Ignore ambient noise below this threshold
+                MAX_ECHO_BASELINE = 800    # Cap baseline - if echo is too loud, use fixed threshold
+                MIN_BARGE_IN_RMS = 1000    # Absolute minimum RMS to consider as speech
 
                 while True:
                     with self.state_lock:
@@ -677,18 +679,26 @@ class TTSHandler:
                             if echo_rms_samples:
                                 echo_rms_samples.sort()
                                 idx = int(len(echo_rms_samples) * 0.75)
-                                echo_baseline = max(echo_rms_samples[idx], 200.0)
+                                raw_baseline = echo_rms_samples[idx]
+                                # Cap the baseline to prevent unreachable thresholds
+                                echo_baseline = min(raw_baseline, MAX_ECHO_BASELINE)
+                                if raw_baseline > MAX_ECHO_BASELINE:
+                                    logger.info(f"🔊 Echo baseline capped: {raw_baseline:.0f} → {echo_baseline:.0f} (from {len(echo_rms_samples)} samples)")
+                                else:
+                                    logger.info(f"🔊 Echo baseline calibrated: {echo_baseline:.0f} (from {len(echo_rms_samples)} samples)")
                             else:
-                                echo_baseline = 500.0
+                                echo_baseline = 400.0  # Default if no samples
+                                logger.info(f"🔊 Echo baseline defaulted: {echo_baseline:.0f} (no samples)")
                             calibrated = True
-                            logger.debug(f"🔊 Echo RMS baseline: {echo_baseline:.0f}")
 
                         # Phase 2: barge-in detection
                         if calibrated and elapsed >= BARGE_IN_GRACE and self.is_barge_in_enabled:
-                            if rms > echo_baseline * RMS_MULTIPLIER:
+                            threshold = max(echo_baseline * RMS_MULTIPLIER, MIN_BARGE_IN_RMS)
+                            if rms > threshold:
                                 consecutive_loud += 1
+                                logger.debug(f"🎤 Loud frame {consecutive_loud}/{LOUD_FRAMES_NEEDED}: RMS={rms:.0f} > threshold={threshold:.0f}")
                                 if consecutive_loud >= LOUD_FRAMES_NEEDED:
-                                    logger.info(f"🎤 Barge-in (RMS {rms:.0f} >> baseline {echo_baseline:.0f})")
+                                    logger.info(f"🎤 Barge-in detected! (RMS {rms:.0f} > threshold {threshold:.0f}, baseline was {echo_baseline:.0f})")
                                     try:
                                         self.kokoro_engine.stop_playback()
                                     except Exception:
