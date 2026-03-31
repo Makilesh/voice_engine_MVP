@@ -430,6 +430,9 @@ class TTSHandler:
                 
         except Exception as e:
             logger.error(f"❌ Speak error: {e}")
+            # CRITICAL: Reset tts_is_active on exception to prevent permanent suppression
+            if self.main_stt:
+                self.main_stt.tts_is_active = False
             # Fallback to SystemEngine
             if self.use_cartesia:
                 logger.warning("🔄 Falling back to SystemEngine")
@@ -757,6 +760,17 @@ class TTSHandler:
         except Exception as e:
             logger.error(f"❌ Wait error: {e}")
             return False
+        finally:
+            # CRITICAL: Always reset tts_is_active regardless of how we exit
+            self._ensure_stt_active()
+    
+    def _ensure_stt_active(self):
+        """Forcibly reset STT state to active listening mode.
+        Call this at the end of every TTS path to guarantee STT is never left suppressed."""
+        if self.main_stt:
+            self.main_stt.tts_is_active = False
+            self.main_stt.clear_realtime_text()
+            logger.debug("🎤 STT state reset — ready for transcription")
     
     def is_barge_in_detected(self) -> bool:
         """Check if user interrupted playback."""

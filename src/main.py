@@ -80,9 +80,10 @@ async def handle_conversation_turn(stt_handler, llm_handler, tts_handler,
         user_text = await stt_handler.get_transcription()
         
         if not user_text:
-            logger.warning("⚠️ No speech detected")
-            print("❌ No speech detected. Please try again.")
-            conversation_manager.record_error()
+            # Empty STT return is a normal timeout, NOT a system error.
+            # Loop back to listening immediately without incrementing error count.
+            logger.info("⏳ No speech detected — waiting for user...")
+            print("💬 (Listening...)")
             return True, False
         
         stt_time = time.time() - turn_start

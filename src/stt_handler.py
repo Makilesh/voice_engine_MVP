@@ -131,13 +131,13 @@ class STTHandler:
                         # CRITICAL: Enable real-time callbacks
                         enable_realtime_transcription=True,
                         on_realtime_transcription_update=on_realtime_update,
-                        # on_transcription_complete=on_transcription_complete,
+                        on_transcription_complete=on_transcription_complete,  # Fallback capture path
                         realtime_model_type="tiny.en",  # Tiny for real-time preview, main model for final
                         
-                        # PRODUCTION OPTIMIZED - Fast response
+                        # PRODUCTION OPTIMIZED - Relaxed for post-TTS recovery
                         realtime_processing_pause=0.1,
-                        post_speech_silence_duration=0.4,  # Wait before considering speech done (was 0.5s)
-                        min_length_of_recording=0.5,
+                        post_speech_silence_duration=0.3,  # Reduced from 0.4 for faster response
+                        min_length_of_recording=0.3,       # Reduced from 0.5 to catch short utterances
                         min_gap_between_recordings=0.2,
                         pre_recording_buffer_duration=0.2,
                         
@@ -203,10 +203,15 @@ class STTHandler:
     
     def flush_recorder(self):
         """Discard any pending audio captured during TTS playback (echo).
-        Call after TTS completes to ensure the next get_transcription() starts fresh."""
+        Call after TTS completes to ensure the next get_transcription() starts fresh.
+        NOTE: We do NOT call recorder.abort() here — it corrupts VAD state on Windows
+        and causes recorder.text() to hang forever. Only clear the audio queue."""
+        # Brief pause to let any in-flight audio chunks drain through the pipe
+        import time
+        time.sleep(0.3)
         if self.recorder:
             try:
-                self.recorder.abort()
+                # Only clear the audio queue — do NOT call abort() as it breaks VAD state
                 self.recorder.clear_audio_queue()
             except Exception as e:
                 logger.debug(f"Recorder flush: {e}")
@@ -276,7 +281,11 @@ class STTHandler:
             
             start_time = asyncio.get_event_loop().time()
             
-            # Clear previous state
+            # CRITICAL: Force-reset tts_is_active at the start of every transcription
+            # to prevent stuck flag from exceptions in TTS wait_for_completion()
+            self.tts_is_active = False
+            
+            # Clear previous state and any stale echo text
             self.last_completed_text = ""
             self.clear_realtime_text()
             
@@ -291,7 +300,7 @@ class STTHandler:
                     timeout=timeout
                 )
             except asyncio.TimeoutError:
-                logger.error(f"❌ STT timeout after {timeout} seconds - no speech detected")
+                logger.warning(f"⚠️ STT timeout after {timeout}s — no speech detected (normal)")
                 return ""
             except OSError as e:
                 # WinError 6: handle invalidated by multiprocessing pipe on Windows.
@@ -305,6 +314,12 @@ class STTHandler:
                 raise
             
             latency = (asyncio.get_event_loop().time() - start_time) * 1000
+            
+            # If recorder.text() returned empty but we have a completed transcription
+            # from the callback, use that as fallback
+            if not text and self.last_completed_text:
+                text = self.last_completed_text
+                logger.debug(f"📝 Using fallback from on_transcription_complete: {text}")
             
             if text:
                 text = self._apply_corrections(text)
