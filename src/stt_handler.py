@@ -53,6 +53,10 @@ class STTHandler:
         # (speaker audio feeds back into mic → Whisper hallucinates garbage)
         self.tts_is_active = False
         
+        # Current TTS text for echo detection (allows selective barge-in)
+        self._current_tts_text = ""
+        self._tts_text_lock = threading.Lock()
+        
         # CRITICAL: Completed transcription queue (non-blocking)
         self.completed_transcriptions = asyncio.Queue()
         self.last_completed_text = ""
@@ -84,14 +88,68 @@ class STTHandler:
         
         return text.strip()
     
+    def set_current_tts_text(self, text: str):
+        """Set the text currently being spoken by TTS (for echo detection)."""
+        with self._tts_text_lock:
+            self._current_tts_text = text.lower() if text else ""
+    
+    def clear_current_tts_text(self):
+        """Clear the current TTS text."""
+        with self._tts_text_lock:
+            self._current_tts_text = ""
+    
+    @staticmethod
+    def _strip_punct(text: str) -> set:
+        """Lowercase, strip punctuation, return word set."""
+        import re
+        return set(re.sub(r'[^\w\s]', '', text.lower()).split())
+    
+    def _is_likely_echo(self, stt_text: str) -> bool:
+        """
+        Detect if STT text is likely an echo of the current TTS output.
+        Uses word-overlap ratio — if ≥30% of STT words appear in TTS text, it's echo.
+        """
+        if not stt_text:
+            return False
+        with self._tts_text_lock:
+            tts_text = self._current_tts_text
+        if not tts_text:
+            return False
+        
+        stt_words = self._strip_punct(stt_text)
+        tts_words = self._strip_punct(tts_text)
+        if not stt_words:
+            return False
+        
+        overlap = len(stt_words & tts_words)
+        ratio = overlap / len(stt_words)
+        
+        if ratio >= 0.3:
+            logger.debug(f"🔇 Echo detected ({ratio:.0%} overlap): '{stt_text[:40]}...'")
+            return True
+        return False
+    
     def _on_realtime_update(self, text: str):
-        """CRITICAL: Called continuously during speech (non-blocking)."""
-        # Suppress echo: while TTS is playing, the mic picks up speaker audio
-        # and Whisper hallucinates garbage text. Discard it.
+        """CRITICAL: Called continuously during speech (non-blocking).
+        Uses selective echo filtering to allow barge-in detection during TTS."""
+        # SELECTIVE ECHO FILTERING: Instead of blanket suppression, check if
+        # this speech matches the TTS output (echo) or is different (barge-in)
         if self.tts_is_active:
-            logger.debug(f"🔇 Suppressing echo during TTS: '{text[:30] if text else ''}...'")
-            return
-        # Log that we're receiving speech - proves VAD is working
+            if self._is_likely_echo(text):
+                # Echo of TTS output - suppress
+                return
+            elif text and len(text.strip()) >= 3:
+                # Different speech during TTS = potential barge-in!
+                logger.info(f"🎤 BARGE-IN SPEECH during TTS: '{text[:50]}'")
+                # Still update realtime_text so barge-in detection can see it
+                with self.realtime_lock:
+                    self.realtime_text = text
+                return
+            else:
+                # Too short to determine - suppress to be safe
+                return
+        
+        # Normal operation (TTS not active)
         if text and text.strip():
             logger.info(f"🎙️ Heard: '{text}'")
         with self.realtime_lock:
@@ -114,13 +172,19 @@ class STTHandler:
                 def on_realtime_update(text: str):
                     handler_self._on_realtime_update(text)
                     
-                    # Only trigger barge-in stop when:
-                    # 1. TTS is NOT active (would be echo, not real user speech)
-                    # 2. User is actually saying something (not noise)
-                    if (not handler_self.tts_is_active
-                            and handler_self.tts_stop_callback
-                            and text and len(text.strip()) >= 4):
-                        handler_self.tts_stop_callback()
+                    # Trigger barge-in stop when:
+                    # 1. User is saying something substantial (not noise)
+                    # 2. Either TTS is not active, OR speech doesn't match TTS (barge-in)
+                    if text and len(text.strip()) >= 4:
+                        if not handler_self.tts_is_active:
+                            # Normal case: TTS not playing, user spoke
+                            if handler_self.tts_stop_callback:
+                                handler_self.tts_stop_callback()
+                        elif not handler_self._is_likely_echo(text):
+                            # BARGE-IN: TTS is playing but speech is different!
+                            logger.info(f"🛑 Barge-in trigger: '{text[:30]}...'")
+                            if handler_self.tts_stop_callback:
+                                handler_self.tts_stop_callback()
                 
                 def on_transcription_complete(text: str):
                     handler_self._on_transcription_complete(text)
