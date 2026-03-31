@@ -234,7 +234,9 @@ class LLMHandler:
             system_prompt = self._build_dynamic_system_prompt(sentiment['sentiment'], has_history=True)
 
             # Check if we can use cached message history
-            current_history_id = id(conversation_history)
+            # NOTE: Use hash of tuple contents, not id(), because get_history() returns
+            # a new list object every call (id would never match).
+            current_history_id = hash(tuple(conversation_history))
             if current_history_id != self.cache_history_id:
                 # Rebuild message cache with length limits
                 MAX_MESSAGE_LENGTH = 500

@@ -497,10 +497,11 @@ class TTSHandler:
                         self.main_stt.tts_stop_callback = self._saved_stt_stop_cb
                     # NOTE: For Kokoro, STT resume (tts_is_active=False) is handled
                     # by wait_for_completion() which blocks and flushes after cooldown.
-                    # For other async engines using this method, resume here.
+                    # For other async engines using this method, flush and resume here.
                     if engine != self.kokoro_engine:
                         if self.main_stt and hasattr(self.main_stt, 'tts_is_active'):
-                            time.sleep(0.5)
+                            time.sleep(0.4)  # Let speaker echo decay
+                            self.main_stt.flush_recorder()  # Discard echo audio
                             self.main_stt.tts_is_active = False
                             self.main_stt.clear_realtime_text()
                             logger.debug("🎤 STT resumed after TTS playback")
@@ -704,12 +705,35 @@ class TTSHandler:
                     self.main_stt.flush_recorder()
                 return not self.barge_in_detected
 
-            # Cartesia (cloud TTS): DON'T BLOCK - audio plays in background
-            # This allows STT to continue listening during TTS playback (full-duplex)
+            # Cartesia (cloud TTS): Block until playback finishes for proper sequencing.
+            # Barge-in detection happens via callback during playback.
             if self.active_engine == "cartesia":
-                # Just return immediately - the audio consumer thread handles playback
-                # Barge-in detection happens via callback during playback
-                return True
+                start_time = time.time()
+                while True:
+                    with self.state_lock:
+                        if not self.is_playing:
+                            # Playback finished — flush STT before returning
+                            if self.main_stt:
+                                time.sleep(0.4)  # Let speaker echo decay
+                                self.main_stt.flush_recorder()
+                                self.main_stt.tts_is_active = False
+                                self.main_stt.clear_realtime_text()
+                            return not self.barge_in_detected
+                        if self.barge_in_detected:
+                            # Barge-in detected — flush and return
+                            if self.main_stt:
+                                time.sleep(0.4)
+                                self.main_stt.flush_recorder()
+                                self.main_stt.tts_is_active = False
+                                self.main_stt.clear_realtime_text()
+                            return False
+                    if time.time() - start_time > timeout:
+                        logger.warning("⏰ Cartesia playback timeout")
+                        if self.main_stt:
+                            self.main_stt.flush_recorder()
+                            self.main_stt.tts_is_active = False
+                        return False
+                    time.sleep(0.05)  # 50ms polling
             
             # SystemEngine: polling (legacy behavior)
             else:

@@ -428,21 +428,22 @@ class CartesiaTTSEngine:
                     break
             
             # Stream audio from Cartesia (this puts chunks in queue)
+            # NOTE: _stream_audio_from_websocket already puts None sentinel on completion
+            # (both success and error paths), so we do NOT put another one here.
             await self._stream_audio_from_websocket(
                 text=text,
                 voice_config=voice_config,
                 audio_config=audio_config
             )
             
-            # Signal end of stream (consumer will set state to IDLE)
-            self.audio_queue.put(None, timeout=0.5)
-            
+            # _stream_audio_from_websocket already signaled end of stream with None
             return True
             
         except Exception as e:
             logger.error(f"❌ Synthesis error: {e}")
             with self.state_lock:
                 self.state = PlaybackState.IDLE
+            # _stream_audio_from_websocket exception path already puts None sentinel
             return False
     
     async def stop(self):

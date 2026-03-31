@@ -17,6 +17,9 @@ logger = logging.getLogger(__name__)
 class STTHandler:
     """Full-duplex STT with continuous real-time transcription."""
     
+    # Maximum recorder restart attempts per session (WinError 6 recovery)
+    MAX_RECORDER_RESTARTS = 3
+    
     # Pre-compiled regex patterns for better performance (no need to compile on every call)
     CORRECTIONS = {
         re.compile(r'\b(Shambhata|Shambla Tech|Shambla|Shamlataq|Shamlaq|Shamlata|Samba|Sharma Tech|Sham Tech|Shamlata Tech)\b', re.IGNORECASE): 'Shamla Tech',
@@ -53,6 +56,9 @@ class STTHandler:
         # CRITICAL: Completed transcription queue (non-blocking)
         self.completed_transcriptions = asyncio.Queue()
         self.last_completed_text = ""
+        
+        # WinError 6 recovery: track restart attempts
+        self._recorder_restart_count = 0
         
         logger.info(f"🎤 STT Handler initialized (FULL-DUPLEX mode: {mode}, model: {self.model_name})")
     
@@ -224,6 +230,33 @@ class STTHandler:
         except Exception:
             return 0.0
     
+    async def _restart_recorder(self):
+        """Attempt to restart the recorder after WinError 6.
+        Returns True if restart succeeded, False otherwise."""
+        if self._recorder_restart_count >= self.MAX_RECORDER_RESTARTS:
+            logger.error(f"❌ Max recorder restarts ({self.MAX_RECORDER_RESTARTS}) reached this session")
+            return False
+        
+        self._recorder_restart_count += 1
+        logger.info(f"🔄 Restarting STT recorder (attempt {self._recorder_restart_count}/{self.MAX_RECORDER_RESTARTS})")
+        
+        try:
+            # Tear down existing recorder
+            if self.recorder:
+                try:
+                    self.recorder = None
+                except Exception:
+                    pass
+            self.is_listening = False
+            
+            # Re-initialize with same parameters
+            await self.start_listening()
+            logger.info("✅ STT recorder restarted successfully")
+            return True
+        except Exception as e:
+            logger.error(f"❌ Recorder restart failed: {e}")
+            return False
+
     async def get_transcription(self) -> str:
         """
         BLOCKING call to get next completed transcription.
@@ -252,6 +285,16 @@ class STTHandler:
             except asyncio.TimeoutError:
                 logger.error(f"❌ STT timeout after {timeout} seconds - no speech detected")
                 return ""
+            except OSError as e:
+                # WinError 6: handle invalidated by multiprocessing pipe on Windows.
+                # Attempt to restart the recorder rather than crash the session.
+                if hasattr(e, 'winerror') and e.winerror == 6:
+                    logger.warning("⚠️ STT pipe handle invalid (WinError 6) — attempting recorder restart")
+                    restarted = await self._restart_recorder()
+                    if restarted:
+                        logger.info("🎤 Recorder restarted — ready for next transcription")
+                    return ""
+                raise
             
             latency = (asyncio.get_event_loop().time() - start_time) * 1000
             
