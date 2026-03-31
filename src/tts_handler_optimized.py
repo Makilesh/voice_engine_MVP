@@ -546,6 +546,10 @@ class TTSHandler:
             # Clear stop event from any previous call
             self.stop_event.clear()
             self._playback_start_time = time.time()   # Start grace period clock
+            
+            # Set dynamic barge-in grace period: ~150ms per word, clamped [0.5s, 2.5s]
+            word_count = len(text.split())
+            self._barge_in_grace_period = min(2.5, max(0.5, word_count * 0.15))
 
             # Disable STT→stop_playback path during async playback
             self._saved_stt_stop_cb = None
@@ -585,12 +589,8 @@ class TTSHandler:
                     # Restore STT stop callback
                     if self.main_stt and hasattr(self.main_stt, 'tts_stop_callback'):
                         self.main_stt.tts_stop_callback = self._saved_stt_stop_cb
-                    # Resume STT after echo settles
-                    if self.main_stt and hasattr(self.main_stt, 'tts_is_active'):
-                        time.sleep(0.5)
-                        self.main_stt.tts_is_active = False
-                        self.main_stt.clear_realtime_text()
-                        logger.debug("🎤 STT resumed after TTS playback")
+                    # NOTE: STT flush/resume is now handled by wait_for_completion() for Cartesia.
+                    # Do NOT duplicate here — would race with wait_for_completion and double-flush.
             
             threading.Thread(target=monitor_completion, daemon=True).start()
             
@@ -648,6 +648,7 @@ class TTSHandler:
                 BARGE_IN_GRACE = 2.0       # Don't allow barge-in before this
                 RMS_MULTIPLIER = 2.5       # User must be 2.5× louder than echo
                 LOUD_FRAMES_NEEDED = 6     # ~0.3s sustained at 50ms polling
+                RMS_NOISE_FLOOR = 100      # Ignore ambient noise below this threshold
 
                 while True:
                     with self.state_lock:
@@ -665,9 +666,9 @@ class TTSHandler:
                     if self.main_stt:
                         rms = self.main_stt.get_audio_rms()
 
-                        # Phase 1: calibrate echo baseline
+                        # Phase 1: calibrate echo baseline (only samples above noise floor)
                         if not calibrated and elapsed < CALIBRATION_SECS:
-                            if rms > 0:
+                            if rms > RMS_NOISE_FLOOR:
                                 echo_rms_samples.append(rms)
                         elif not calibrated:
                             if echo_rms_samples:
@@ -709,24 +710,16 @@ class TTSHandler:
             # Barge-in detection happens via callback during playback.
             if self.active_engine == "cartesia":
                 start_time = time.time()
+                completed = False
+                barge_in = False
                 while True:
                     with self.state_lock:
                         if not self.is_playing:
-                            # Playback finished — flush STT before returning
-                            if self.main_stt:
-                                time.sleep(0.4)  # Let speaker echo decay
-                                self.main_stt.flush_recorder()
-                                self.main_stt.tts_is_active = False
-                                self.main_stt.clear_realtime_text()
-                            return not self.barge_in_detected
+                            completed = not self.barge_in_detected
+                            break
                         if self.barge_in_detected:
-                            # Barge-in detected — flush and return
-                            if self.main_stt:
-                                time.sleep(0.4)
-                                self.main_stt.flush_recorder()
-                                self.main_stt.tts_is_active = False
-                                self.main_stt.clear_realtime_text()
-                            return False
+                            barge_in = True
+                            break
                     if time.time() - start_time > timeout:
                         logger.warning("⏰ Cartesia playback timeout")
                         if self.main_stt:
@@ -734,6 +727,15 @@ class TTSHandler:
                             self.main_stt.tts_is_active = False
                         return False
                     time.sleep(0.05)  # 50ms polling
+                
+                # Flush STT OUTSIDE the lock to avoid deadlock
+                if self.main_stt:
+                    time.sleep(0.4)  # Let speaker echo decay
+                    self.main_stt.flush_recorder()
+                    self.main_stt.tts_is_active = False
+                    self.main_stt.clear_realtime_text()
+                
+                return completed if not barge_in else False
             
             # SystemEngine: polling (legacy behavior)
             else:

@@ -223,6 +223,9 @@ class STTHandler:
             if not chunks:
                 return 0.0
             data = b''.join(chunks)
+            # Guard: buffer must be even-length for int16 casting
+            if len(data) % 2 != 0:
+                return 0.0
             audio = np.frombuffer(data, dtype=np.int16)
             if len(audio) == 0:
                 return 0.0
@@ -241,12 +244,17 @@ class STTHandler:
         logger.info(f"🔄 Restarting STT recorder (attempt {self._recorder_restart_count}/{self.MAX_RECORDER_RESTARTS})")
         
         try:
-            # Tear down existing recorder
+            # Tear down existing recorder properly to avoid zombie processes on Windows
             if self.recorder:
                 try:
-                    self.recorder = None
+                    # Stop/abort the recorder to clean up multiprocessing resources
+                    if hasattr(self.recorder, 'stop'):
+                        self.recorder.stop()
+                    elif hasattr(self.recorder, 'abort'):
+                        self.recorder.abort()
                 except Exception:
                     pass
+                self.recorder = None
             self.is_listening = False
             
             # Re-initialize with same parameters
