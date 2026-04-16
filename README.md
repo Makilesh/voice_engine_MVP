@@ -2,7 +2,7 @@
 
 <div align="center">
 
-![Python](https://img.shields.io/badge/Python-3.8%2B-blue)
+![Python](https://img.shields.io/badge/Python-3.9%2B-blue)
 ![Status](https://img.shields.io/badge/Status-Production%20Ready-success)
 ![License](https://img.shields.io/badge/License-MIT-green)
 ![Performance](https://img.shields.io/badge/Latency-200--500ms-orange)
@@ -54,7 +54,14 @@ cp .env.example .env
 OPENAI_API_KEY=sk-your-openai-key
 CARTESIA_API_KEY=sk_car_your-cartesia-key
 GEMINI_API_KEY=your-gemini-key  # Optional fallback
+GROQ_API_KEY=gsk_your-groq-key  # Optional fallback
+OLLAMA_ENABLED=false            # Optional local fallback
+OLLAMA_BASE_URL=http://localhost:11434
+OLLAMA_MODEL=llama3.1:8b
+USE_CARTESIA_TTS=false          # true = Cartesia, false = local Kokoro (default)
 ```
+
+> Note: `config.py` currently validates `CARTESIA_API_KEY` as required.
 
 ### Run
 
@@ -101,7 +108,7 @@ async def get_transcription(self, timeout: float = 30.0) -> str:
 | Mode | Model | Latency | Accuracy | Use Case |
 |------|-------|---------|----------|----------|
 | **Fast** | tiny.en | 100-150ms | Good | Real-time demos, speed-critical |
-| **Balanced** | tiny.en | 100-150ms | Good | General use (recommended) |
+| **Balanced** | small.en | 150-250ms | Better | General use (recommended) |
 | **Accurate** | base.en | 200-350ms | Excellent | Complex speech, enterprise |
 
 #### Advanced Features
@@ -119,10 +126,10 @@ async def get_transcription(self, timeout: float = 30.0) -> str:
 
 #### Supported Providers
 
-1. **OpenAI GPT-4o-mini** (Primary) - 120-180ms response time
-2. **Google Gemini 1.5-flash** (Fallback 1) - Fast inference
-3. **Groq llama-3.1-8b-instant** (Fallback 2) - Ultra-fast alternative
-4. **Ollama** (Fallback 3 / Local) - Privacy-focused, no internet required
+1. **Groq llama-3.1-8b-instant** (priority if `GROQ_API_KEY` is set)
+2. **Ollama** (priority if `OLLAMA_ENABLED=true`)
+3. **Google Gemini 1.5-flash** (priority if `GEMINI_API_KEY` is set)
+4. **OpenAI GPT-4o-mini** (priority if `OPENAI_API_KEY` is set)
 
 #### Capabilities
 
@@ -177,7 +184,7 @@ max_history_turns: 6             # Context window size
 
 ### 3. Text-to-Speech (TTS) Engine
 
-**Technology**: Cartesia AI Sonic-3 with WebSocket streaming
+**Technology**: Hybrid TTS (Kokoro local GPU by default, Cartesia Sonic-3 optional, SystemEngine fallback)
 
 #### Capabilities
 
@@ -276,7 +283,7 @@ async def handle_conversation_turn():
              ▼
     ┌────────────────┐
     │  LLM Handler   │ ◄─── Multi-provider fallback
-    │ (Async HTTP)   │      (OpenAI → Gemini → Groq)
+    │ (Async HTTP)   │      (Groq → Ollama → Gemini → OpenAI)
     └────────┬───────┘
              │ Response Text
              ▼
@@ -417,14 +424,14 @@ MemoryConfig.latency_mode = "low_latency"
 ```
 **Expected**: ~200-300ms turn time
 
-##### Preset 2: Balanced (Recommended)
+##### Preset 2: Current Code Defaults
 ```python
 # Default configuration
-STTConfig.mode = "fast"
+STTConfig.mode = "accurate"
 LLMConfig.openai_max_tokens = 120
-MemoryConfig.latency_mode = "balanced"
+MemoryConfig.latency_mode = "low_latency"
 ```
-**Expected**: ~300-500ms turn time
+**Expected**: Environment-dependent (this is the current default, not a guaranteed latency profile)
 
 ##### Preset 3: High Accuracy (Quality Priority)
 ```python
@@ -452,7 +459,7 @@ src/config.py           # Main configuration with validation
 ```python
 @dataclass
 class STTConfig:
-    mode: str = "fast"
+    mode: str = "accurate"
     model_size: Optional[str] = None
     silero_sensitivity: float = 0.5
     webrtc_sensitivity: int = 3
@@ -477,7 +484,7 @@ class TTSConfig:
 
 @dataclass
 class MemoryConfig:
-    latency_mode: str = "balanced"
+    latency_mode: str = "low_latency"
     enable_memory_monitoring: bool = True
     memory_check_interval: float = 5.0
 ```
@@ -515,7 +522,7 @@ def get_queue_size_for_mode(mode: str) -> int:
 class MemoryConfig:
     enable_memory_monitoring: bool = True
     memory_check_interval: float = 5.0
-    memory_warning_threshold_mb: float = 500.0
+    memory_warning_threshold_mb: float = 800.0
     memory_critical_threshold_mb: float = 1000.0
 ```
 
@@ -588,12 +595,14 @@ logging.DEBUG   # Detailed trace (development only)
 3. LLM: Process with context                          │
    ├─ Add to conversation history (deque)            │
    ├─ Build system prompt (cached)                   │
-   ├─ Try OpenAI → Gemini → Groq → Ollama           │
+   ├─ Try providers by configured priority            │
+   │  (Groq → Ollama → Gemini → OpenAI)              │
    ├─ Retry with exponential backoff                 │
    └─ Return response + sentiment analysis           │
                       │                               │
 4. TTS: Stream audio playback                         │
-   ├─ Connect to Cartesia WebSocket                  │
+   ├─ Prefer local Kokoro (default)                  │
+   ├─ Optional Cartesia WebSocket path               │
    ├─ Stream audio chunks to queue                   │
    ├─ Audio consumer thread: Play via PyAudio        │
    ├─ Barge-in monitor: Watch for interruption   ────┘
@@ -605,32 +614,21 @@ logging.DEBUG   # Detailed trace (development only)
 ### Project Structure
 
 ```
-voice_MVP/
+voice_engine_MVP/
 ├── src/
-│   ├── main.py                              # Entry point, conversation loop
-│   ├── config.py                            # Centralized configuration
-│   ├── stt_handler.py                       # Speech-to-Text handler
-│   ├── llm_handler.py                       # LLM processing with fallbacks
-│   ├── tts_handler_optimized.py             # TTS handler with barge-in
-│   ├── cartesia_tts_engine_optimized.py     # Low-latency TTS engine
+│   ├── main.py                              # Entry point
+│   ├── config.py                            # Centralized config + validation
+│   ├── stt_handler.py                       # Full-duplex STT
+│   ├── llm_handler.py                       # Multi-provider LLM handler
+│   ├── tts_handler_optimized.py             # Hybrid TTS handler
+│   ├── cartesia_tts_engine_optimized.py     # Cartesia streaming TTS engine
+│   ├── kokoro_tts_engine.py                 # Local Kokoro TTS engine
+│   ├── test_kokoro_local.py                 # Local Kokoro test script
 │   └── utils/
 │       └── audio_utils.py                   # Audio utility functions
-├── tests/
-│   ├── test_stt.py                          # STT unit tests
-│   ├── test_llm.py                          # LLM unit tests
-│   ├── test_tts.py                          # TTS unit tests
-│   ├── test_integration.py                  # Integration tests
-│   └── testsss/                             # Debug scripts
-├── audio/
-│   ├── input/                               # Input audio files
-│   └── output/                              # Generated audio files
-├── responses/                                # Stored responses
 ├── requirements.txt                          # Python dependencies
 ├── .env.example                             # Environment template
-├── README.md                                # This file
-├── PERFORMANCE_TUNING_GUIDE.md              # Performance optimization guide
-├── Project_Overview.md                      # Technical deep dive
-└── PROBLEMS_AND_SOLUTIONS.md                # Development log
+└── README.md                                # This file
 ```
 
 ---
@@ -690,28 +688,28 @@ Test Environment: Windows 11, 16GB RAM, i7 processor
 
 ```python
 # Speech Recognition
-RealtimeSTT==0.1.16         # Real-time speech-to-text
-faster-whisper              # Optimized Whisper implementation
-silero-vad                  # Voice activity detection
+RealtimeSTT
+faster-whisper
 
 # Language Models
-httpx==0.24.1               # Async HTTP client
-openai                      # OpenAI API
-google-generativeai         # Gemini API
+httpx
+openai
 
 # Text-to-Speech
-cartesia                    # Ultra-low latency TTS
-PyAudio==0.2.13             # Audio playback
+RealtimeTTS[kokoro]
+RealtimeTTS
+cartesia
+pyaudio
 
 # Utilities
-python-dotenv==1.0.0        # Environment management
+python-dotenv
 psutil                      # System monitoring
-dataclasses                 # Configuration
+torch                       # Optional acceleration
 ```
 
 ### System Requirements
 
-- **Python**: 3.8 or higher
+- **Python**: 3.9 or higher
 - **OS**: Windows 10/11, macOS 10.15+, Ubuntu 20.04+
 - **RAM**: 2GB minimum, 4GB recommended
 - **CPU**: Multi-core recommended for full-duplex
@@ -720,10 +718,8 @@ dataclasses                 # Configuration
 
 ### API Requirements
 
-- **OpenAI API Key** (Primary LLM)
-- **Cartesia API Key** (Primary TTS)
-- **Gemini API Key** (Optional fallback)
-- **Groq API Key** (Optional fallback)
+- **At least one LLM provider**: OpenAI, Gemini, Groq, or Ollama
+- **Cartesia API Key**: currently required by config validation
 
 ---
 
@@ -731,9 +727,7 @@ dataclasses                 # Configuration
 
 ### Comprehensive Guides
 
-- **[PERFORMANCE_TUNING_GUIDE.md](PERFORMANCE_TUNING_GUIDE.md)**: Complete parameter reference, optimization strategies
-- **[Project_Overview.md](Project_Overview.md)**: Technical architecture deep dive
-- **[PROBLEMS_AND_SOLUTIONS.md](PROBLEMS_AND_SOLUTIONS.md)**: Development decisions and solved issues
+- This README is currently the primary project documentation.
 
 ### Quick Links
 
@@ -827,42 +821,16 @@ class TTSConfig:
 ### Run All Tests
 
 ```bash
-cd tests
-python -m pytest -v
+cd src
+python test_kokoro_local.py
 ```
 
 ### Run Specific Tests
 
 ```bash
-# STT only
-python test_stt.py
-
-# LLM only
-python test_llm.py
-
-# TTS only
-python test_tts.py
-
-# Integration
-python test_integration.py
-```
-
-### Debug Scripts
-
-```bash
-cd tests/testsss
-
-# Test microphone
-python test_mic.py
-
-# Test VAD
-python test_vad.py
-
-# Test full pipeline
-python test_full_duplex.py
-
-# Test Cartesia integration
-python test_cartesia_integration.py
+# Local Kokoro engine check
+cd src
+python test_kokoro_local.py
 ```
 
 ---
